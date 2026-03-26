@@ -1,0 +1,92 @@
+# Deploy Cellular Dashboard to the Slate 7 router
+#
+# Required GitHub Secrets:
+#   ROUTER_HOST   – IP address or hostname of the router (e.g. 192.168.1.1)
+#   ROUTER_USER   – SSH username on the router          (default: root)
+#   ROUTER_SSH_KEY – Private SSH key (PEM) for the router
+#
+# The workflow:
+#   1. Builds the Vite/React frontend
+#   2. Copies dist/ and server.js to /opt/cellular-dashboard on the router
+#   3. Installs Node.js production dependencies on the router
+#   4. Restarts the server (via a procd init script if present, or directly)
+#
+# One-time router setup (run manually once):
+#   opkg update && opkg install node node-npm
+#   mkdir -p /opt/cellular-dashboard
+#   # Create /etc/init.d/cellular-dashboard (see README for script)
+
+name: Deploy to Slate 7 Router
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.ROUTER_SSH_KEY }}
+
+      - name: Add router to known hosts
+        run: |
+          ssh-keyscan -H "${{ secrets.ROUTER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload build to router
+        env:
+          ROUTER_HOST: ${{ secrets.ROUTER_HOST }}
+          ROUTER_USER: ${{ secrets.ROUTER_USER || 'root' }}
+        run: |
+          # Sync dist/ (frontend) and server.js to the router
+          rsync -az --delete \
+            dist/ \
+            "${ROUTER_USER}@${ROUTER_HOST}:/opt/cellular-dashboard/dist/"
+
+          rsync -az \
+            server.js \
+            package.json \
+            package-lock.json \
+            "${ROUTER_USER}@${ROUTER_HOST}:/opt/cellular-dashboard/"
+
+      - name: Install production dependencies on router
+        env:
+          ROUTER_HOST: ${{ secrets.ROUTER_HOST }}
+          ROUTER_USER: ${{ secrets.ROUTER_USER || 'root' }}
+        run: |
+          ssh "${ROUTER_USER}@${ROUTER_HOST}" \
+            "cd /opt/cellular-dashboard && npm ci --omit=dev"
+
+      - name: Restart server on router
+        env:
+          ROUTER_HOST: ${{ secrets.ROUTER_HOST }}
+          ROUTER_USER: ${{ secrets.ROUTER_USER || 'root' }}
+        run: |
+          ssh "${ROUTER_USER}@${ROUTER_HOST}" \
+            "/etc/init.d/cellular-dashboard restart 2>/dev/null || \
+             (pkill -f 'node server.js' 2>/dev/null; \
+              cd /opt/cellular-dashboard && \
+              nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &)"

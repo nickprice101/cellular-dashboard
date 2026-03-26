@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,13 +25,14 @@ import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, Calendar
  *   - add to current plan
  *   - start a new plan session
  *
- * Integration note for production on the router:
- * - Replace mockRouterUsage with a tiny API endpoint that shells out to:
- *     vnstat --json -i wwan0
- *   and optionally device usage from nlbwmon or another collector.
+ * Integration with the router:
+ * - /api/router/usage  shells out to: vnstat --json -i wwan0
+ * - /api/router/devices reads /tmp/dhcp.leases and enriches with `ip neigh`
+ * The UI falls back gracefully when the endpoints are not reachable.
  */
 
 const STORAGE_KEY = "mobile-data-dashboard-v1";
+const DEFAULT_POLLING_MINUTES = 15;
 const COUNTRY_OPTIONS = [
   "Netherlands",
   "Belgium",
@@ -168,7 +169,7 @@ function seedState() {
     settings: {
       interfaceName: "wwan0",
       providerName: "EIOT Club",
-      pollingMinutes: 15,
+      pollingMinutes: DEFAULT_POLLING_MINUTES,
     },
   };
 }
@@ -325,6 +326,8 @@ export default function MobileDataDashboard() {
   const [leaseText, setLeaseText] = useState("");
   const [isDetectingDevices, setIsDetectingDevices] = useState(false);
   const [deviceDetectMessage, setDeviceDetectMessage] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
 
   useEffect(() => {
     saveState(state);
@@ -372,20 +375,43 @@ export default function MobileDataDashboard() {
         : "normal"
     : "warning";
 
-  function syncMockUsage(extraGb = 0.15) {
-    setState((prev) => {
-      const nextTotal = Number((prev.routerUsage.totalGb + extraGb).toFixed(3));
-      return {
+  const syncRouterUsage = useCallback(async () => {
+    setIsSyncing(true);
+    setSyncError("");
+    try {
+      const response = await fetch(
+        `/api/router/usage?iface=${encodeURIComponent(state.settings.interfaceName || "wwan0")}`,
+        { cache: "no-store" }
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const nextTotal = Number(payload.totalGb || 0);
+      setState((prev) => ({
         ...prev,
         routerUsage: {
           ...prev.routerUsage,
           totalGb: nextTotal,
           updatedAt: new Date().toISOString(),
         },
-        usageSnapshots: [...prev.usageSnapshots, { at: new Date().toISOString(), totalGb: nextTotal }].slice(-90),
-      };
-    });
-  }
+        usageSnapshots: [
+          ...prev.usageSnapshots,
+          { at: new Date().toISOString(), totalGb: nextTotal },
+        ].slice(-90),
+      }));
+    } catch (err) {
+      setSyncError(`Router unreachable: ${err.message}. Usage data not updated.`);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [state.settings.interfaceName]);
+
+  // Auto-poll the router on mount and on the configured interval
+  useEffect(() => {
+    syncRouterUsage();
+    const minutes = Math.max(1, Number(state.settings.pollingMinutes) || DEFAULT_POLLING_MINUTES);
+    const id = setInterval(syncRouterUsage, minutes * 60 * 1000);
+    return () => clearInterval(id);
+  }, [state.settings.pollingMinutes, syncRouterUsage]);
 
   function updateDeviceUsage(index, field, value) {
     setState((prev) => ({
@@ -436,7 +462,7 @@ export default function MobileDataDashboard() {
 
       setDeviceDetectMessage(`Auto-detected ${detected.length} device${detected.length === 1 ? "" : "s"} from the router.`);
     } catch {
-      setDeviceDetectMessage("Live router auto-detect is not wired yet here. Paste /tmp/dhcp.leases below to simulate the same result.");
+      setDeviceDetectMessage("Router device endpoint not reachable. Paste /tmp/dhcp.leases below to import devices manually.");
     } finally {
       setIsDetectingDevices(false);
     }
@@ -573,9 +599,9 @@ export default function MobileDataDashboard() {
             <p className="text-muted-foreground">Plan-aware router data tracking with FIFO depletion, purchase history, and device usage insights.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => syncMockUsage()}>
-              <Router className="mr-2 h-4 w-4" />
-              Sync usage
+            <Button variant="outline" onClick={() => syncRouterUsage()} disabled={isSyncing}>
+              <RefreshCw className={`mr-2 h-4 w-4${isSyncing ? " animate-spin" : ""}`} />
+              {isSyncing ? "Syncing…" : "Sync usage"}
             </Button>
             <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
               <DialogTrigger asChild>
@@ -734,6 +760,14 @@ export default function MobileDataDashboard() {
             <Database className="h-4 w-4" />
             <AlertTitle>No active plan</AlertTitle>
             <AlertDescription>Add a purchase to begin plan-aware tracking.</AlertDescription>
+          </Alert>
+        )}
+
+        {syncError && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Sync error</AlertTitle>
+            <AlertDescription>{syncError}</AlertDescription>
           </Alert>
         )}
 
@@ -1020,24 +1054,23 @@ export default function MobileDataDashboard() {
 
             <Card className="rounded-2xl shadow-sm">
               <CardHeader>
-                <CardTitle>Production integration notes</CardTitle>
-                <CardDescription>What to wire up on the router.</CardDescription>
+                <CardTitle>Router API endpoints</CardTitle>
+                <CardDescription>Run <code>npm start</code> on the router to activate live data.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm text-muted-foreground">
                 <div className="rounded-xl border p-3">
-                  1. Poll <code>vnstat --json -i wwan0</code> and map total usage into <code>routerUsage.totalGb</code>.
+                  <strong>GET /api/router/usage</strong> — shells out to <code>vnstat --json -i wwan0</code> and returns <code>{`{ totalGb }`}</code>.
+                  The UI polls this endpoint every <em>polling interval</em> minutes and on page load.
                 </div>
                 <div className="rounded-xl border p-3">
-                  2. Persist purchases and snapshots in a JSON file or localStorage-backed web app served by the router.
+                  <strong>GET /api/router/devices</strong> — reads <code>/tmp/dhcp.leases</code> and enriches entries with <code>ip neigh</code>.
+                  Returns <code>{`{ devices: [{ mac, ip, hostname, vendor, lastSeen, source }] }`}</code>.
                 </div>
                 <div className="rounded-xl border p-3">
-                  3. Auto-detect devices from <code>/tmp/dhcp.leases</code>, enrich with <code>ip neigh</code>, and use MAC address as the canonical device key so names and history survive IP changes.
+                  Without the backend running: the UI still loads, purchases and history persist in localStorage, but router/device auto-detect will not be live.
                 </div>
                 <div className="rounded-xl border p-3">
-                  4. Example router endpoint response shape: <code>{`{ devices: [{ mac, ip, hostname, name, vendor, usedGb, lastSeen, source }] }`}</code>.
-                </div>
-                <div className="rounded-xl border p-3">
-                  5. FIFO depletion is already built in: older remaining data is consumed first, then the next plan takes over automatically.
+                  FIFO depletion is built in: older remaining data is consumed first, then the next plan takes over automatically.
                 </div>
               </CardContent>
             </Card>
