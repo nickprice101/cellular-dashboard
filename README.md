@@ -15,8 +15,10 @@ node server.js     # Backend API server (in a separate terminal)
 ### One-time router setup
 
 ```bash
-opkg update && opkg install node node-npm
-mkdir -p /www/mobile-data-dashboard
+opkg update
+opkg install node node-npm
+opkg install procps-ng-pkill
+mkdir -p /root/mobile-data-dashboard
 ```
 
 ### Deploy
@@ -52,24 +54,33 @@ This produces a `dist/` folder in the project root.
 **3. Copy files to the router**
 
 ```bash
-rsync -az --delete dist/ root@192.168.8.1:/www/mobile-data-dashboard/dist/
-rsync -az server.js package.json package-lock.json root@192.168.8.1:/www/mobile-data-dashboard/
+rsync -az --delete dist/ root@192.168.8.1:/root/mobile-data-dashboard/dist/
+rsync -az server.js package.json package-lock.json root@192.168.8.1:/root/mobile-data-dashboard/
 ```
 
-```Powershell
-scp -O -r dist/* root@192.168.8.1:/www/mobile-data-dashboard/dist/
-scp -O server.js package.json package-lock.json root@192.168.8.1:/www/mobile-data-dashboard/
+```powershell
+scp -O -r dist/* root@192.168.8.1:/root/mobile-data-dashboard/dist/
+scp -O server.js package.json package-lock.json root@192.168.8.1:/root/mobile-data-dashboard/
+```
 
 **4. Install production Node dependencies on the router**
 
 ```bash
-ssh root@192.168.8.1 "cd /www/mobile-data-dashboard && npm ci --omit=dev"
+ssh root@192.168.8.1 "cd /root/mobile-data-dashboard && npm ci --omit=dev"
+```
+
+```powershell
+ssh root@192.168.8.1 "cd /root/mobile-data-dashboard && npm ci --omit=dev"
 ```
 
 **5. Start (or restart) the server on the router**
 
 ```bash
-ssh root@192.168.8.1 "pkill -f 'node server.js'; cd /www/mobile-data-dashboard && nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &"
+ssh root@192.168.8.1 "pkill -f 'node server.js'; cd /root/mobile-data-dashboard && nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &"
+```
+
+```powershell
+ssh root@192.168.8.1 "pkill -f 'node server.js'; cd /root/mobile-data-dashboard && nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &"
 ```
 
 The dashboard will be available at `http://192.168.8.1:3001`.
@@ -86,7 +97,7 @@ STOP=1
 
 start_service() {
     procd_open_instance
-    procd_set_param command /usr/bin/node /www/mobile-data-dashboard/server.js
+    procd_set_param command /usr/bin/node /root/mobile-data-dashboard/server.js
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
