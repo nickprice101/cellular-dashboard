@@ -1,11 +1,7 @@
-This is a Vite/React app, it needs to be built to be deployed on the Salte 7. 
+Before performing any edits in this repository:
 
-npm create vite@latest mobile-data-dashboard -- --template react
-cd mobile-data-dashboard
-npm install
-npm install recharts lucide-react
+Ensure the repository matches origin/main.
+Run: git fetch origin git reset --hard origin/main git clean -fd
+Do not proceed with modifications until the repo is synced.
 
-npx shadcn@latest init
-npx shadcn@latest add button card input label dialog table tabs badge alert progress
-
-npm run build
+This is a Vite/React app, built to be deployed on the GL.iNet Slate 7. 
