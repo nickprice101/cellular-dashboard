@@ -535,7 +535,11 @@ export default function MobileDataDashboard() {
       return;
     }
 
-    setState((prev) => ({ ...prev, plans: [...prev.plans, plan] }));
+    setState((prev) => ({
+      ...prev,
+      plans: [...prev.plans, plan],
+      deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+    }));
     setDialogOpen(false);
     resetPurchaseForm();
   }
@@ -546,7 +550,11 @@ export default function MobileDataDashboard() {
     if (mode === "add") {
       setState((prev) => {
         const current = getCurrentPlan(allocateUsageFIFO(prev.plans, prev.routerUsage.totalGb));
-        if (!current) return { ...prev, plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }] };
+        if (!current) return {
+          ...prev,
+          plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }],
+          deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+        };
         return {
           ...prev,
           plans: prev.plans.map((p) =>
@@ -568,7 +576,11 @@ export default function MobileDataDashboard() {
         };
       });
     } else {
-      setState((prev) => ({ ...prev, plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }] }));
+      setState((prev) => ({
+        ...prev,
+        plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }],
+        deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+      }));
     }
 
     setPendingPlan(null);
