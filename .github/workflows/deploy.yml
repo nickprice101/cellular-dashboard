@@ -7,13 +7,13 @@
 #
 # The workflow:
 #   1. Builds the Vite/React frontend
-#   2. Copies dist/ and server.js to /opt/cellular-dashboard on the router
+#   2. Copies dist/ and server.js to /www/mobile-data-dashboard on the router
 #   3. Installs Node.js production dependencies on the router
 #   4. Restarts the server (via a procd init script if present, or directly)
 #
 # One-time router setup (run manually once):
 #   opkg update && opkg install node node-npm
-#   mkdir -p /opt/cellular-dashboard
+#   mkdir -p /www/mobile-data-dashboard
 #   # Create /etc/init.d/cellular-dashboard (see README for script)
 
 name: Deploy to Slate 7 Router
@@ -64,13 +64,13 @@ jobs:
           # Sync dist/ (frontend) and server.js to the router
           rsync -az --delete \
             dist/ \
-            "${ROUTER_USER}@${ROUTER_HOST}:/opt/cellular-dashboard/dist/"
+            "${ROUTER_USER}@${ROUTER_HOST}:/www/mobile-data-dashboard/dist/"
 
           rsync -az \
             server.js \
             package.json \
             package-lock.json \
-            "${ROUTER_USER}@${ROUTER_HOST}:/opt/cellular-dashboard/"
+            "${ROUTER_USER}@${ROUTER_HOST}:/www/mobile-data-dashboard/"
 
       - name: Install production dependencies on router
         env:
@@ -78,7 +78,7 @@ jobs:
           ROUTER_USER: ${{ secrets.ROUTER_USER || 'root' }}
         run: |
           ssh "${ROUTER_USER}@${ROUTER_HOST}" \
-            "cd /opt/cellular-dashboard && npm ci --omit=dev"
+            "cd /www/mobile-data-dashboard && npm ci --omit=dev"
 
       - name: Restart server on router
         env:
@@ -88,5 +88,5 @@ jobs:
           ssh "${ROUTER_USER}@${ROUTER_HOST}" \
             "/etc/init.d/cellular-dashboard restart 2>/dev/null || \
              (pkill -f 'node server.js' 2>/dev/null; \
-              cd /opt/cellular-dashboard && \
+              cd /www/mobile-data-dashboard && \
               nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &)"
