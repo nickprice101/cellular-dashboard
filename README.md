@@ -56,6 +56,10 @@ rsync -az --delete dist/ root@192.168.8.1:/www/mobile-data-dashboard/dist/
 rsync -az server.js package.json package-lock.json root@192.168.8.1:/www/mobile-data-dashboard/
 ```
 
+```Powershell
+scp -O -r dist/* root@192.168.8.1:/www/mobile-data-dashboard/dist/
+scp -O server.js package.json package-lock.json root@192.168.8.1:/www/mobile-data-dashboard/
+
 **4. Install production Node dependencies on the router**
 
 ```bash
