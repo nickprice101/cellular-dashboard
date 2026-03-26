@@ -535,7 +535,11 @@ export default function MobileDataDashboard() {
       return;
     }
 
-    setState((prev) => ({ ...prev, plans: [...prev.plans, plan] }));
+    setState((prev) => ({
+      ...prev,
+      plans: [...prev.plans, plan],
+      deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+    }));
     setDialogOpen(false);
     resetPurchaseForm();
   }
@@ -546,7 +550,11 @@ export default function MobileDataDashboard() {
     if (mode === "add") {
       setState((prev) => {
         const current = getCurrentPlan(allocateUsageFIFO(prev.plans, prev.routerUsage.totalGb));
-        if (!current) return { ...prev, plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }] };
+        if (!current) return {
+          ...prev,
+          plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }],
+          deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+        };
         return {
           ...prev,
           plans: prev.plans.map((p) =>
@@ -568,7 +576,11 @@ export default function MobileDataDashboard() {
         };
       });
     } else {
-      setState((prev) => ({ ...prev, plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }] }));
+      setState((prev) => ({
+        ...prev,
+        plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }],
+        deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+      }));
     }
 
     setPendingPlan(null);
@@ -887,11 +899,12 @@ export default function MobileDataDashboard() {
                         </div>
                         <Button variant="outline" size="sm" onClick={() => removePlan(plan.id)}>Remove</Button>
                       </div>
-                      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+                      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-5">
                         <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Purchased</div><div className="mt-1 font-medium">{fmtGB(plan.purchasedGb)}</div></div>
                         <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Used</div><div className="mt-1 font-medium">{fmtGB(plan.usedGb || 0)}</div></div>
                         <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Remaining</div><div className="mt-1 font-medium">{fmtGB(plan.remainingGb)}</div></div>
                         <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Validity</div><div className="mt-1 font-medium">{fmtDate(plan.validFrom)} → {fmtDate(plan.validUntil)}</div></div>
+                        <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Price</div><div className="mt-1 font-medium">{fmtMoney(plan.cost)}</div></div>
                       </div>
                       {plan.notes && <div className="mt-3 text-sm text-muted-foreground">Notes: {plan.notes}</div>}
                     </div>
@@ -901,34 +914,36 @@ export default function MobileDataDashboard() {
           </TabsContent>
 
           <TabsContent value="devices" className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-            <Card className="xl:col-span-2 rounded-2xl shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2"><BarChart3 className="h-5 w-5" />Data usage by device</CardTitle>
-                <CardDescription>Pie chart shows each device’s total usage and percentage on the same chart.</CardDescription>
-              </CardHeader>
-              <CardContent className="h-[420px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      dataKey="value"
-                      nameKey="name"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={140}
-                      labelLine={false}
-                      label={({ percent, value, name }) => `${name}: ${(percent * 100).toFixed(0)}% · ${fmtGB(value)}`}
-                    >
-                      {pieData.map((entry, index) => (
-                        <Cell key={`cell-${entry.name}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(value) => fmtGB(Number(value))} />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
+            {currentPlan && (
+              <Card className="xl:col-span-2 rounded-2xl shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2"><BarChart3 className="h-5 w-5" />Data usage by device</CardTitle>
+                  <CardDescription>Pie chart shows each device’s usage and percentage for the current active plan.</CardDescription>
+                </CardHeader>
+                <CardContent className="h-[420px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={140}
+                        labelLine={false}
+                        label={({ percent, value, name }) => `${name}: ${(percent * 100).toFixed(0)}% · ${fmtGB(value)}`}
+                      >
+                        {pieData.map((entry, index) => (
+                          <Cell key={`cell-${entry.name}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip formatter={(value) => fmtGB(Number(value))} />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
 
                         <Card className="rounded-2xl shadow-sm">
               <CardHeader>
