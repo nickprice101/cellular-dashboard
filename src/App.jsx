@@ -424,15 +424,27 @@ export default function MobileDataDashboard() {
         : [];
 
       setState((prev) => {
-        // Reset all existing devices to not-connected, then update/add from detected
+        // Build a lookup of all previously-tracked devices keyed by MAC so we
+        // can preserve user-assigned names and accumulated usage data.
+        const prevByMac = new Map(
+          prev.deviceUsage.map((d) => [normalizeMac(d.mac), d])
+        );
+
+        // Start with only manual devices – auto-detected entries from previous
+        // scans are intentionally dropped here so that stale devices from a
+        // different subnet (or devices the router no longer knows about) are
+        // purged automatically on each successful scan.
         const byMac = new Map(
-          prev.deviceUsage.map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
+          prev.deviceUsage
+            .filter((d) => d.source === "manual")
+            .map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
         );
 
         detected.forEach((device) => {
           const mac = device.mac;
           if (byMac.has(mac)) {
-            // Update connection status and network info but preserve name/source
+            // Manual device with matching MAC – keep manual settings, update
+            // network info and connection status.
             const current = byMac.get(mac);
             byMac.set(mac, {
               ...current,
@@ -442,17 +454,21 @@ export default function MobileDataDashboard() {
               connected: device.connected ?? true,
             });
           } else {
-            // Only add genuinely new devices not already in the list
-            byMac.set(mac, device);
+            // New or re-appearing auto device: restore the user's custom name
+            // and any previously accumulated usage so that renaming / usage
+            // history survives router rescans.
+            const existing = prevByMac.get(mac);
+            byMac.set(mac, {
+              ...device,
+              name: existing?.name || device.name || "",
+              usedGb: existing?.usedGb || 0,
+            });
           }
         });
 
         return {
           ...prev,
-          // Remove non-connected auto-detected devices that have never consumed data
-          deviceUsage: Array.from(byMac.values()).filter(
-            (d) => d.mac && (d.source === "manual" || d.connected || Number(d.usedGb || 0) > 0)
-          ),
+          deviceUsage: Array.from(byMac.values()),
         };
       });
 
