@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from "recharts";
-import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, CalendarDays, BarChart3, ScanSearch, RefreshCw, Wifi, Pencil, Trash2, Check, X } from "lucide-react";
+import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, CalendarDays, BarChart3, ScanSearch, RefreshCw, Wifi, Pencil, Trash2, Check, X, Play, Pause } from "lucide-react";
 
 /**
  * Mobile Data Dashboard
@@ -115,7 +115,7 @@ function isExpired(plan, now = new Date()) {
 }
 
 function isActive(plan, now = new Date()) {
-  return !isExpired(plan, now) && Number(plan.remainingGb) > 0;
+  return !isExpired(plan, now) && Number(plan.remainingGb) > 0 && plan.status !== "paused";
 }
 
 function loadState() {
@@ -177,23 +177,34 @@ function seedState() {
 function getDisplayPlanStatus(plan) {
   if (Number(plan.remainingGb) <= 0) return "depleted";
   if (isExpired(plan)) return "expired";
+  if (plan.status === "paused") return "paused";
   return "active";
 }
 
 function allocateUsageFIFO(plans, totalRouterGb) {
-  const sorted = [...plans].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  // Active plans are consumed first (FIFO by createdAt), then paused plans (FIFO by createdAt)
+  const activeSorted = [...plans]
+    .filter((p) => p.status !== "paused")
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const pausedSorted = [...plans]
+    .filter((p) => p.status === "paused")
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+  const orderedPlans = [...activeSorted, ...pausedSorted];
   let remainingToAllocate = Number(totalRouterGb || 0);
 
-  const nextPlans = sorted.map((p) => {
+  const nextPlans = orderedPlans.map((p) => {
     const cap = Number(p.purchasedGb || 0);
     const used = Math.min(cap, Math.max(0, remainingToAllocate));
     const remaining = Math.max(0, cap - used);
     remainingToAllocate = Math.max(0, remainingToAllocate - cap);
+    const computedStatus =
+      remaining <= 0 ? "depleted" : isExpired(p) ? "expired" : p.status === "paused" ? "paused" : "active";
     return {
       ...p,
       remainingGb: Number(remaining.toFixed(3)),
       usedGb: Number(used.toFixed(3)),
-      status: remaining <= 0 ? "depleted" : isExpired(p) ? "expired" : "active",
+      status: computedStatus,
     };
   });
 
@@ -202,7 +213,7 @@ function allocateUsageFIFO(plans, totalRouterGb) {
 
 function getCurrentPlan(plans) {
   const activeSorted = [...plans]
-    .filter((p) => Number(p.remainingGb) > 0)
+    .filter((p) => isActive(p))
     .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
   return activeSorted[0] || null;
 }
@@ -571,6 +582,25 @@ export default function MobileDataDashboard() {
     }));
   }
 
+  function pausePlan(id) {
+    setState((prev) => ({
+      ...prev,
+      plans: prev.plans.map((p) => (p.id === id ? { ...p, status: "paused" } : p)),
+    }));
+  }
+
+  function activatePlan(id) {
+    setState((prev) => ({
+      ...prev,
+      plans: prev.plans.map((p) => {
+        if (p.id === id) return { ...p, status: "active" };
+        // Pause any currently active plans so only one is active at a time
+        if (p.status === "active") return { ...p, status: "paused" };
+        return p;
+      }),
+    }));
+  }
+
   function buildPlan(form, sessionType) {
     const validFromIso = new Date(form.validFrom).toISOString();
     return {
@@ -641,11 +671,17 @@ export default function MobileDataDashboard() {
         };
       });
     } else {
-      setState((prev) => ({
-        ...prev,
-        plans: [...prev.plans, { ...pendingPlan, sessionType: "new" }],
-        deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
-      }));
+      setState((prev) => {
+        const current = getCurrentPlan(prev.plans);
+        const updatedPlans = current
+          ? prev.plans.map((p) => (p.id === current.id ? { ...p, status: "paused" } : p))
+          : prev.plans;
+        return {
+          ...prev,
+          plans: [...updatedPlans, { ...pendingPlan, sessionType: "new" }],
+          deviceUsage: prev.deviceUsage.map((d) => ({ ...d, usedGb: 0 })),
+        };
+      });
     }
 
     setPendingPlan(null);
@@ -752,7 +788,7 @@ export default function MobileDataDashboard() {
             <DialogHeader>
               <DialogTitle>Remaining data detected</DialogTitle>
               <DialogDescription>
-                There is still active data on the current plan. Would you like to add this purchase to the current plan or start a new session?
+                There is still active data on the current plan. Would you like to add this purchase to the current plan or start a new session? Starting a new session will pause the current plan.
               </DialogDescription>
             </DialogHeader>
             {currentPlan && (
@@ -879,7 +915,13 @@ export default function MobileDataDashboard() {
                   <TableBody>
                     {plans
                       .slice()
-                      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                      .sort((a, b) => {
+                        const order = { active: 0, paused: 1, expired: 2, depleted: 3 };
+                        const aO = order[getDisplayPlanStatus(a)] ?? 4;
+                        const bO = order[getDisplayPlanStatus(b)] ?? 4;
+                        if (aO !== bO) return aO - bO;
+                        return new Date(b.createdAt) - new Date(a.createdAt);
+                      })
                       .map((plan) => (
                         <TableRow key={plan.id}>
                           <TableCell>
@@ -896,7 +938,17 @@ export default function MobileDataDashboard() {
                           </TableCell>
                           <TableCell>{fmtMoney(plan.cost)}</TableCell>
                           <TableCell>
-                            <Badge variant={getDisplayPlanStatus(plan) === "active" ? "default" : "secondary"}>{getDisplayPlanStatus(plan)}</Badge>
+                            <Badge
+                              variant={
+                                getDisplayPlanStatus(plan) === "active"
+                                  ? "default"
+                                  : getDisplayPlanStatus(plan) === "paused"
+                                    ? "outline"
+                                    : "secondary"
+                              }
+                            >
+                              {getDisplayPlanStatus(plan)}
+                            </Badge>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -944,25 +996,55 @@ export default function MobileDataDashboard() {
             <Card className="rounded-2xl shadow-sm">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><CalendarDays className="h-5 w-5" />Plan ledger</CardTitle>
-                <CardDescription>Manage sequential data purchases and how they are consumed over time.</CardDescription>
+                <CardDescription>Manage sequential data purchases and how they are consumed over time. Active plans are consumed first; paused plans queue behind them.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {plans
                   .slice()
-                  .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+                  .sort((a, b) => {
+                    const order = { active: 0, paused: 1, expired: 2, depleted: 3 };
+                    const aO = order[getDisplayPlanStatus(a)] ?? 4;
+                    const bO = order[getDisplayPlanStatus(b)] ?? 4;
+                    if (aO !== bO) return aO - bO;
+                    return new Date(a.createdAt) - new Date(b.createdAt);
+                  })
                   .map((plan, idx) => (
                     <div key={plan.id} className="rounded-2xl border p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div>
                           <div className="flex items-center gap-2">
                             <h3 className="font-medium">{idx + 1}. {plan.name}</h3>
-                            <Badge variant={getDisplayPlanStatus(plan) === "active" ? "default" : "secondary"}>{getDisplayPlanStatus(plan)}</Badge>
+                            <Badge
+                              variant={
+                                getDisplayPlanStatus(plan) === "active"
+                                  ? "default"
+                                  : getDisplayPlanStatus(plan) === "paused"
+                                    ? "outline"
+                                    : "secondary"
+                              }
+                            >
+                              {getDisplayPlanStatus(plan)}
+                            </Badge>
                           </div>
                           <p className="mt-1 text-sm text-muted-foreground">
                             {plan.country || "No country"} · {plan.provider || "No provider"} · Created {fmtDate(plan.createdAt)}
                           </p>
                         </div>
-                        <Button variant="outline" size="sm" onClick={() => removePlan(plan.id)}>Remove</Button>
+                        <div className="flex flex-wrap gap-2">
+                          {getDisplayPlanStatus(plan) === "active" && (
+                            <Button variant="outline" size="sm" onClick={() => pausePlan(plan.id)}>
+                              <Pause className="mr-1.5 h-3.5 w-3.5" />
+                              Pause
+                            </Button>
+                          )}
+                          {getDisplayPlanStatus(plan) === "paused" && (
+                            <Button variant="outline" size="sm" onClick={() => activatePlan(plan.id)}>
+                              <Play className="mr-1.5 h-3.5 w-3.5" />
+                              Activate
+                            </Button>
+                          )}
+                          <Button variant="outline" size="sm" onClick={() => removePlan(plan.id)}>Remove</Button>
+                        </div>
                       </div>
                       <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-5">
                         <div className="rounded-xl bg-muted/50 p-3"><div className="text-xs text-muted-foreground">Purchased</div><div className="mt-1 font-medium">{fmtGB(plan.purchasedGb)}</div></div>
