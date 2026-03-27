@@ -27,7 +27,7 @@ import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, Calendar
  *
  * Integration with the router:
  * - /api/router/usage  shells out to: vnstat --json -i wwan0
- * - /api/router/devices reads /tmp/dhcp.leases and enriches with `ip neigh`
+ * - /api/router/devices reads /tmp/dhcp.leases, enriches with `ip neigh`, and adds OUI vendor lookup
  * The UI falls back gracefully when the endpoints are not reachable.
  */
 
@@ -419,7 +419,7 @@ export default function MobileDataDashboard() {
             lastSeen: device.lastSeen || new Date().toISOString(),
             usedGb: 0,
             source: "auto",
-            connected: true,
+            connected: device.connected ?? true,
           }))
         : [];
 
@@ -439,7 +439,7 @@ export default function MobileDataDashboard() {
               ip: device.ip || current.ip || "",
               hostname: device.hostname || current.hostname || "",
               lastSeen: device.lastSeen || current.lastSeen || "",
-              connected: true,
+              connected: device.connected ?? true,
             });
           } else {
             // Only add genuinely new devices not already in the list
@@ -1096,11 +1096,11 @@ export default function MobileDataDashboard() {
               </Card>
             )}
 
-                        <Card className="rounded-2xl shadow-sm">
+            <Card className="rounded-2xl shadow-sm">
               <CardHeader>
                 <CardTitle>Devices (MAC-based)</CardTitle>
                 <CardDescription>
-                  Auto-detect devices from router leases. <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-500" />connected</span> · <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />not connected</span>. Manual devices persist across sessions.
+                  Auto-detect reads <code>/tmp/dhcp.leases</code>, <code>ip neigh</code>, and OUI vendor lookup from the router. <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-500" />connected</span> · <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />not connected</span>. Manual devices persist across sessions.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1114,10 +1114,6 @@ export default function MobileDataDashboard() {
                       <Wifi className="mr-2 h-4 w-4" />
                       Import DHCP leases
                     </Button>
-                  </div>
-
-                  <div className="text-xs text-muted-foreground">
-                    For production on your router, the auto-detect endpoint should combine <code>/tmp/dhcp.leases</code>, <code>ip neigh</code>, and optional vendor lookup.
                   </div>
 
                   {deviceDetectMessage && (
@@ -1169,7 +1165,7 @@ export default function MobileDataDashboard() {
                             <div className="truncate text-sm font-medium">{displayName}</div>
                           )}
                           <div className="truncate text-xs text-muted-foreground">
-                            {device.mac}{device.ip ? ` · ${device.ip}` : ""}{device.hostname && device.name !== device.hostname ? ` · ${device.hostname}` : ""}
+                            {device.mac}{device.ip ? ` · ${device.ip}` : ""}{device.hostname && device.name !== device.hostname ? ` · ${device.hostname}` : ""}{device.vendor && device.vendor !== "Unknown vendor" ? ` · ${device.vendor}` : ""}
                           </div>
                         </div>
                         <Badge variant="outline" className="flex-shrink-0 text-xs">
@@ -1270,8 +1266,8 @@ export default function MobileDataDashboard() {
                   The UI polls this endpoint every <em>polling interval</em> minutes and on page load.
                 </div>
                 <div className="rounded-xl border p-3">
-                  <strong>GET /api/router/devices</strong> — reads <code>/tmp/dhcp.leases</code> and enriches entries with <code>ip neigh</code>.
-                  Returns <code>{`{ devices: [{ mac, ip, hostname, vendor, lastSeen, source }] }`}</code>.
+                  <strong>GET /api/router/devices</strong> — reads <code>/tmp/dhcp.leases</code>, enriches entries with <code>ip neigh</code> (for live connection state), and adds OUI-based vendor lookup.
+                  Returns <code>{`{ devices: [{ mac, ip, hostname, vendor, lastSeen, source, connected }] }`}</code>.
                 </div>
                 <div className="rounded-xl border p-3">
                   Without the backend running: the UI still loads, purchases and history persist in localStorage, but router/device auto-detect will not be live.
