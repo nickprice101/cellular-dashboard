@@ -7,7 +7,8 @@
  *                             via `vnstat --json -i <iface>`
  *
  *   GET /api/router/devices – connected LAN clients via
- *                             /tmp/dhcp.leases + `ip neigh` + OUI vendor lookup
+ *                             /tmp/dhcp.leases + `ip neigh` + `iw dev station dump`
+ *                             + OUI vendor lookup
  *
  * Start with:  node server.js
  * Default port: 3001  (override with PORT env var)
@@ -373,6 +374,41 @@ async function getIpNeighMap() {
   }
 }
 
+/**
+ * Return a Set of MAC addresses currently associated with any WiFi interface.
+ * Uses `iw dev` to discover interfaces then `iw dev <iface> station dump` for each.
+ * Falls back to an empty Set when `iw` is unavailable.
+ */
+async function getWifiStations() {
+  const macs = new Set();
+  try {
+    const { stdout: devOut } = await execFileAsync("iw", ["dev"], { timeout: 5_000 });
+    const ifaces = [];
+    for (const line of devOut.split(/\r?\n/)) {
+      const m = line.match(/^\s+Interface\s+(\S+)/);
+      if (m) ifaces.push(m[1]);
+    }
+    await Promise.all(
+      ifaces.map(async (iface) => {
+        try {
+          const { stdout } = await execFileAsync("iw", ["dev", iface, "station", "dump"], {
+            timeout: 5_000,
+          });
+          for (const line of stdout.split(/\r?\n/)) {
+            const m = line.match(/^Station\s+([0-9a-f:]+)\s+/i);
+            if (m) macs.add(m[1].toUpperCase());
+          }
+        } catch {
+          // interface may not support station dump – skip
+        }
+      })
+    );
+  } catch {
+    // iw not available – fall back gracefully
+  }
+  return macs;
+}
+
 // ── API: usage ───────────────────────────────────────────────────────────────
 
 app.get("/api/router/usage", async (req, res) => {
@@ -390,15 +426,21 @@ app.get("/api/router/usage", async (req, res) => {
 
 app.get("/api/router/devices", async (req, res) => {
   try {
-    const [leaseDevices, neighMap] = await Promise.all([parseDhcpLeases(), getIpNeighMap()]);
+    const [leaseDevices, neighMap, wifiStations] = await Promise.all([
+      parseDhcpLeases(),
+      getIpNeighMap(),
+      getWifiStations(),
+    ]);
 
     // Merge: prefer DHCP data; enrich with ip neigh state and vendor lookup
     const byMac = new Map();
     leaseDevices.forEach((d) => byMac.set(d.mac, { ...d, connected: false }));
 
-    // Add any neighbours not already in leases; mark connected based on neigh state
+    // Add any neighbours not already in leases.
+    // Only REACHABLE/DELAY/PROBE indicate current activity – STALE means the
+    // kernel cache is stale and the device may have disconnected already.
     neighMap.forEach(({ mac, state }, ip) => {
-      const connected = /^(REACHABLE|STALE|DELAY|PROBE)$/i.test(state);
+      const neighConnected = /^(REACHABLE|DELAY|PROBE)$/i.test(state);
       if (!byMac.has(mac)) {
         byMac.set(mac, {
           mac,
@@ -407,7 +449,7 @@ app.get("/api/router/devices", async (req, res) => {
           vendor: guessVendorFromMac(mac),
           lastSeen: new Date().toISOString(),
           source: "neigh",
-          connected,
+          connected: neighConnected,
         });
       } else {
         const existing = byMac.get(mac);
@@ -415,7 +457,25 @@ app.get("/api/router/devices", async (req, res) => {
           ...existing,
           ip: existing.ip || ip,
           neighState: state,
-          connected: existing.connected || connected,
+          connected: existing.connected || neighConnected,
+        });
+      }
+    });
+
+    // WiFi station dump is the authoritative source for currently-associated
+    // wireless clients – mark any known device as connected if it is associated.
+    wifiStations.forEach((mac) => {
+      if (byMac.has(mac)) {
+        byMac.set(mac, { ...byMac.get(mac), connected: true });
+      } else {
+        byMac.set(mac, {
+          mac,
+          ip: "",
+          hostname: "",
+          vendor: guessVendorFromMac(mac),
+          lastSeen: new Date().toISOString(),
+          source: "wifi",
+          connected: true,
         });
       }
     });
