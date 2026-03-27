@@ -123,36 +123,36 @@ Run-Ssh "Prepare remote directories" "mkdir -p $RemoteDistDir && rm -rf $RemoteD
 Run-Scp "Upload built frontend" @("dist/*") "${HostName}:${RemoteDistDir}/" -Recursive
 Run-Scp "Upload server files" $serverFiles "${HostName}:${RemoteAppDir}/"
 
-$remoteScript = @"
+$remoteScript = @'
 #!/bin/sh
 set -e
 
-APP_DIR="$RemoteAppDir"
-LOG_FILE="$RemoteLogFile"
-PID_FILE="$RemotePidFile"
+APP_DIR="__REMOTE_APP_DIR__"
+LOG_FILE="__REMOTE_LOG_FILE__"
+PID_FILE="__REMOTE_PID_FILE__"
 NODE_BIN="$(command -v node)"
 
-cd "$RemoteAppDir"
+cd "$APP_DIR"
 
 npm ci --omit=dev
 
-rm -f "$RemotePidFile"
+rm -f "$PID_FILE"
 
-OLD_PIDS="$(ps | grep "$RemoteAppDir/server.js" | grep -v grep | awk '{print $1}')"
+OLD_PIDS="$(ps | grep "$APP_DIR/server.js" | grep -v grep | awk '{print $1}')"
 for pid in $OLD_PIDS; do
   kill "$pid" >/dev/null 2>&1 || true
 done
 
 sleep 2
 
-STILL_RUNNING="$(ps | grep "$RemoteAppDir/server.js" | grep -v grep | awk '{print $1}')"
+STILL_RUNNING="$(ps | grep "$APP_DIR/server.js" | grep -v grep | awk '{print $1}')"
 for pid in $STILL_RUNNING; do
   kill -9 "$pid" >/dev/null 2>&1 || true
 done
 
 sleep 1
 
-"$NODE_BIN" "$RemoteAppDir/server.js" >>"$LOG_FILE" 2>&1 &
+"$NODE_BIN" "$APP_DIR/server.js" >>"$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 
@@ -165,8 +165,8 @@ if ! kill -0 "$NEW_PID" >/dev/null 2>&1; then
 fi
 
 echo "=== PID FILE ==="
-if [ -s "$RemotePidFile" ]; then
-  cat "$RemotePidFile"
+if [ -s "$PID_FILE" ]; then
+  cat "$PID_FILE"
 else
   echo "No PID file created"
 fi
@@ -176,8 +176,12 @@ wget -qO- "http://127.0.0.1:3001/api/router/devices" 2>/dev/null || true
 echo
 
 echo "=== LOG TAIL ==="
-tail -n 50 "$RemoteLogFile" 2>/dev/null || true
-"@
+tail -n 50 "$LOG_FILE" 2>/dev/null || true
+'@
+
+$remoteScript = $remoteScript.Replace("__REMOTE_APP_DIR__", $RemoteAppDir)
+$remoteScript = $remoteScript.Replace("__REMOTE_LOG_FILE__", $RemoteLogFile)
+$remoteScript = $remoteScript.Replace("__REMOTE_PID_FILE__", $RemotePidFile)
 
 Write-Utf8NoBomLf -Path $LocalRemoteScript -Content $remoteScript
 
