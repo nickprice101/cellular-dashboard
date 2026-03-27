@@ -144,11 +144,7 @@ function seedState() {
       totalGb: 0.33,
       updatedAt: today.toISOString(),
     },
-    deviceUsage: [
-      { id: uid("dev"), mac: "AA:BB:CC:DD:EE:01", name: "Phone", hostname: "iphone", usedGb: 0.18 },
-      { id: uid("dev"), mac: "AA:BB:CC:DD:EE:02", name: "Laptop", hostname: "macbook", usedGb: 0.09 },
-      { id: uid("dev"), mac: "AA:BB:CC:DD:EE:03", name: "Tablet", hostname: "ipad", usedGb: 0.06 },
-    ],
+    deviceUsage: [],
     usageSnapshots: [
       { at: today.toISOString(), totalGb: 0.33 },
     ],
