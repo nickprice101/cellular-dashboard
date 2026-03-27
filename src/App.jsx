@@ -89,20 +89,6 @@ function fmtGB(v) {
   return `${(n * 1024).toFixed(0)} MB`;
 }
 
-function mibToGb(mib) {
-  return Number(mib || 0) / 1024;
-}
-
-function gbToMib(gb) {
-  return Number(gb || 0) * 1024;
-}
-
-function daysBetween(startIso, endIso) {
-  const a = new Date(startIso);
-  const b = new Date(endIso);
-  const ms = b.getTime() - a.getTime();
-  return Math.max(1, Math.ceil(ms / 86400000));
-}
 
 function addDays(isoDate, days) {
   const d = new Date(isoDate);
@@ -340,7 +326,6 @@ export default function MobileDataDashboard() {
   const totalPurchasedGb = useMemo(() => plans.reduce((s, p) => s + Number(p.purchasedGb || 0), 0), [plans]);
   const totalRemainingGb = useMemo(() => plans.reduce((s, p) => s + Number(p.remainingGb || 0), 0), [plans]);
   const totalUsedGb = useMemo(() => Number(state.routerUsage.totalGb || 0), [state.routerUsage.totalGb]);
-  const activePlans = useMemo(() => plans.filter((p) => isActive(p)), [plans]);
   const runoutProjection = useMemo(() => getProjectedRunoutDate(currentPlan, state.usageSnapshots), [currentPlan, state.usageSnapshots]);
 
   const filteredCountries = useMemo(() => {
