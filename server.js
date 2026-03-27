@@ -82,6 +82,32 @@ function mergeUnique(values = []) {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
+function ipv4ToInt(ip) {
+  const parts = String(ip || "").split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return null;
+  }
+  return ((parts[0] << 24) >>> 0) + ((parts[1] << 16) >>> 0) + ((parts[2] << 8) >>> 0) + parts[3];
+}
+
+function ipv4InSubnet(ip, subnet) {
+  const ipInt = ipv4ToInt(ip);
+  const subnetInt = ipv4ToInt(subnet?.address);
+  const maskBits = Number(subnet?.mask);
+  if (ipInt === null || subnetInt === null || !Number.isInteger(maskBits) || maskBits < 0 || maskBits > 32) {
+    return false;
+  }
+
+  const mask = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
+  return (ipInt & mask) === (subnetInt & mask);
+}
+
+function matchesLanSubnet(ip, lanSubnets) {
+  if (!ip) return true;
+  if (!Array.isArray(lanSubnets) || lanSubnets.length === 0) return true;
+  return lanSubnets.some((subnet) => ipv4InSubnet(ip, subnet));
+}
+
 /**
  * Look up the vendor name from a MAC address using a local OUI map.
  * The OUI is the first three octets of the MAC (e.g. "AA:BB:CC").
@@ -449,6 +475,17 @@ async function getHostHintsByMac() {
   return byMac;
 }
 
+async function getLanSubnets() {
+  const payload = await readJsonCommand("ubus", ["call", "network.interface.lan", "status"]);
+  const ipv4 = Array.isArray(payload?.["ipv4-address"]) ? payload["ipv4-address"] : [];
+  return ipv4
+    .map((entry) => ({
+      address: entry?.address || "",
+      mask: Number(entry?.mask),
+    }))
+    .filter((entry) => entry.address && Number.isInteger(entry.mask));
+}
+
 /**
  * Run `ip neigh` and return a map of ip → { mac, state }.
  */
@@ -529,32 +566,6 @@ async function getWifiStationsViaUbus() {
   return macs;
 }
 
-async function getBridgeFdbMacs() {
-  const macs = new Set();
-  const commands = [
-    ["bridge", ["fdb", "show", "br", "br-lan"]],
-    ["bridge", ["fdb", "show"]],
-  ];
-
-  for (const [command, args] of commands) {
-    try {
-      const { stdout } = await execFileAsync(command, args, { timeout: 5_000 });
-      stdout.split(/\r?\n/).forEach((line) => {
-        const macMatch = line.match(/^([0-9a-f:]{17})\s+/i);
-        if (!macMatch) return;
-        const mac = normalizeMac(macMatch[1]);
-        if (!mac || mac === "00:00:00:00:00:00") return;
-        if (/\b(self|permanent|static)\b/i.test(line)) return;
-        macs.add(mac);
-      });
-      if (macs.size) return macs;
-    } catch {
-      // try next fallback
-    }
-  }
-
-  return macs;
-}
 
 // ── API: usage ───────────────────────────────────────────────────────────────
 
@@ -573,20 +584,22 @@ app.get("/api/router/usage", async (req, res) => {
 
 app.get("/api/router/devices", async (req, res) => {
   try {
-    const [leaseDevices, hostHintsByMac, neighMap, wifiStations, bridgeFdbMacs] = await Promise.all([
+    const [leaseDevices, hostHintsByMac, neighMap, wifiStations, lanSubnets] = await Promise.all([
       getDhcpLeaseDevices(),
       getHostHintsByMac(),
       getIpNeighMap(),
       getWifiStations(),
-      getBridgeFdbMacs(),
+      getLanSubnets(),
     ]);
 
     const byMac = new Map();
-    leaseDevices.forEach((d) => byMac.set(d.mac, { ...d, connected: false, sources: ["dhcp"] }));
+    leaseDevices
+      .filter((device) => matchesLanSubnet(device.ip, lanSubnets))
+      .forEach((d) => byMac.set(d.mac, { ...d, connected: false, sources: ["dhcp"] }));
 
     hostHintsByMac.forEach((hint, mac) => {
       const existing = byMac.get(mac);
-      if (!existing) return;
+      if (!existing || !matchesLanSubnet(hint.ip, lanSubnets)) return;
       byMac.set(mac, {
         ...existing,
         ip: existing.ip || hint.ip || "",
@@ -596,11 +609,9 @@ app.get("/api/router/devices", async (req, res) => {
       });
     });
 
-    // Add any neighbours not already in leases.
-    // Only REACHABLE/DELAY/PROBE indicate current activity – STALE means the
-    // kernel cache is stale and the device may have disconnected already.
     neighMap.forEach(({ mac, state }, ip) => {
-      const neighConnected = !/^(FAILED|INCOMPLETE|NOARP|NONE)$/i.test(state);
+      if (!matchesLanSubnet(ip, lanSubnets)) return;
+      const neighConnected = /^(REACHABLE|DELAY|PROBE)$/i.test(state);
       if (!byMac.has(mac)) {
         byMac.set(mac, {
           mac,
@@ -648,30 +659,8 @@ app.get("/api/router/devices", async (req, res) => {
       }
     });
 
-    bridgeFdbMacs.forEach((mac) => {
-      if (byMac.has(mac)) {
-        byMac.set(mac, {
-          ...byMac.get(mac),
-          connected: true,
-          lastSeen: new Date().toISOString(),
-          sources: mergeUnique([...(byMac.get(mac).sources || []), "bridge"]),
-        });
-      } else {
-        byMac.set(mac, {
-          mac,
-          ip: "",
-          hostname: "",
-          vendor: guessVendorFromMac(mac),
-          lastSeen: new Date().toISOString(),
-          source: "bridge",
-          connected: true,
-          sources: ["bridge"],
-        });
-      }
-    });
-
     const devices = Array.from(byMac.values())
-      .filter((device) => device.connected)
+      .filter((device) => device.connected && matchesLanSubnet(device.ip, lanSubnets))
       .sort((a, b) => (a.hostname || a.mac).localeCompare(b.hostname || b.mac));
     res.json({ devices, updatedAt: new Date().toISOString() });
   } catch (err) {
