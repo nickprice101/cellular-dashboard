@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from "recharts";
-import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, CalendarDays, BarChart3, ScanSearch, RefreshCw, Wifi } from "lucide-react";
+import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, CalendarDays, BarChart3, ScanSearch, RefreshCw, Wifi, Pencil, Trash2, Check, X } from "lucide-react";
 
 /**
  * Mobile Data Dashboard
@@ -282,31 +282,6 @@ function parseDhcpLeases(text) {
     .filter(Boolean);
 }
 
-function mergeDetectedDevices(existing, detected) {
-  const byMac = new Map();
-  existing.forEach((device) => byMac.set(normalizeMac(device.mac), { ...device }));
-
-  detected.forEach((device) => {
-    const mac = normalizeMac(device.mac);
-    const current = byMac.get(mac);
-
-    if (current) {
-      byMac.set(mac, {
-        ...current,
-        ip: device.ip || current.ip || "",
-        hostname: device.hostname || current.hostname || "",
-        vendor: device.vendor || current.vendor || "",
-        lastSeen: device.lastSeen || current.lastSeen || "",
-        source: device.source || current.source || "auto",
-      });
-    } else {
-      byMac.set(mac, { ...device, mac });
-    }
-  });
-
-  return Array.from(byMac.values()).filter((d) => d.mac);
-}
-
 export default function MobileDataDashboard() {
   const [state, setState] = useState(() => loadState() || seedState());
   const [countryQuery, setCountryQuery] = useState("");
@@ -328,6 +303,10 @@ export default function MobileDataDashboard() {
   const [deviceDetectMessage, setDeviceDetectMessage] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
+  const [editingDeviceId, setEditingDeviceId] = useState(null);
+  const [editingName, setEditingName] = useState("");
+  const [showManualAddForm, setShowManualAddForm] = useState(false);
+  const [manualAddForm, setManualAddForm] = useState({ mac: "", name: "", ip: "" });
 
   useEffect(() => {
     saveState(state);
@@ -413,20 +392,6 @@ export default function MobileDataDashboard() {
     return () => clearInterval(id);
   }, [state.settings.pollingMinutes, syncRouterUsage]);
 
-  function updateDeviceUsage(index, field, value) {
-    setState((prev) => ({
-      ...prev,
-      deviceUsage: prev.deviceUsage.map((d, i) =>
-        i === index
-          ? {
-              ...d,
-              [field]: field === "usedGb" ? Number(value) : value,
-            }
-          : d
-      ),
-    }));
-  }
-
   function autoNameFromMac(mac) {
     if (!mac) return "Unknown device";
     return `Device ${mac.slice(-5).replace(/:/g, "")}`;
@@ -450,18 +415,48 @@ export default function MobileDataDashboard() {
             name: device.name || "",
             vendor: device.vendor || guessVendorFromMac(device.mac),
             lastSeen: device.lastSeen || new Date().toISOString(),
-            usedGb: Number(device.usedGb || 0),
-            source: device.source || "api",
+            usedGb: 0,
+            source: "auto",
+            connected: true,
           }))
         : [];
 
+      setState((prev) => {
+        // Reset all existing devices to not-connected, then update/add from detected
+        const byMac = new Map(
+          prev.deviceUsage.map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
+        );
+
+        detected.forEach((device) => {
+          const mac = device.mac;
+          if (byMac.has(mac)) {
+            // Update connection status and network info but preserve name/source
+            const current = byMac.get(mac);
+            byMac.set(mac, {
+              ...current,
+              ip: device.ip || current.ip || "",
+              hostname: device.hostname || current.hostname || "",
+              lastSeen: device.lastSeen || current.lastSeen || "",
+              connected: true,
+            });
+          } else {
+            // Only add genuinely new devices not already in the list
+            byMac.set(mac, device);
+          }
+        });
+
+        return {
+          ...prev,
+          deviceUsage: Array.from(byMac.values()).filter((d) => d.mac),
+        };
+      });
+
+      setDeviceDetectMessage(`Scanned router: ${detected.length} device${detected.length === 1 ? "" : "s"} found online.`);
+    } catch {
       setState((prev) => ({
         ...prev,
-        deviceUsage: mergeDetectedDevices(prev.deviceUsage, detected),
+        deviceUsage: prev.deviceUsage.map((d) => ({ ...d, connected: false })),
       }));
-
-      setDeviceDetectMessage(`Auto-detected ${detected.length} device${detected.length === 1 ? "" : "s"} from the router.`);
-    } catch {
       setDeviceDetectMessage("Router device endpoint not reachable. Paste /tmp/dhcp.leases below to import devices manually.");
     } finally {
       setIsDetectingDevices(false);
@@ -471,32 +466,102 @@ export default function MobileDataDashboard() {
   function importDevicesFromLeases() {
     const detected = parseDhcpLeases(leaseText);
 
-    setState((prev) => ({
-      ...prev,
-      deviceUsage: mergeDetectedDevices(prev.deviceUsage, detected),
-    }));
+    setState((prev) => {
+      const byMac = new Map(
+        prev.deviceUsage.map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
+      );
+
+      detected.forEach((device) => {
+        const mac = device.mac;
+        if (byMac.has(mac)) {
+          const current = byMac.get(mac);
+          byMac.set(mac, {
+            ...current,
+            ip: device.ip || current.ip || "",
+            hostname: device.hostname || current.hostname || "",
+            lastSeen: device.lastSeen || current.lastSeen || "",
+            connected: true,
+          });
+        } else {
+          byMac.set(mac, { ...device, connected: true });
+        }
+      });
+
+      return {
+        ...prev,
+        deviceUsage: Array.from(byMac.values()).filter((d) => d.mac),
+      };
+    });
 
     setDeviceDetectMessage(`Imported ${detected.length} device${detected.length === 1 ? "" : "s"} from DHCP leases.`);
   }
 
-  function addDeviceRow() {
+  function removeDevice(id) {
     setState((prev) => ({
       ...prev,
-      deviceUsage: [
-        ...prev.deviceUsage,
-        {
-          id: uid("dev"),
-          mac: "",
-          ip: "",
-          name: "",
-          hostname: "",
-          vendor: "",
-          lastSeen: "",
-          usedGb: 0,
-          source: "manual",
-        },
-      ],
+      deviceUsage: prev.deviceUsage.filter((d) => d.id !== id),
     }));
+  }
+
+  function startRenameDevice(id, currentName) {
+    setEditingDeviceId(id);
+    setEditingName(currentName);
+  }
+
+  function saveDeviceName(id) {
+    setState((prev) => ({
+      ...prev,
+      deviceUsage: prev.deviceUsage.map((d) => {
+        if (d.id !== id) return d;
+        const nameChanged = editingName !== (d.name || "");
+        return {
+          ...d,
+          name: editingName,
+          source: nameChanged ? "manual" : d.source,
+        };
+      }),
+    }));
+    setEditingDeviceId(null);
+    setEditingName("");
+  }
+
+  function cancelRename() {
+    setEditingDeviceId(null);
+    setEditingName("");
+  }
+
+  function cancelManualAdd() {
+    setShowManualAddForm(false);
+    setManualAddForm({ mac: "", name: "", ip: "" });
+  }
+
+  function addManualDevice() {
+    const mac = normalizeMac(manualAddForm.mac);
+    if (!mac) return;
+    setState((prev) => {
+      const exists = prev.deviceUsage.some((d) => normalizeMac(d.mac) === mac);
+      if (exists) return prev;
+      return {
+        ...prev,
+        deviceUsage: [
+          ...prev.deviceUsage,
+          {
+            id: uid("dev"),
+            mac,
+            ip: manualAddForm.ip || "",
+            name: manualAddForm.name || "",
+            hostname: "",
+            vendor: guessVendorFromMac(mac),
+            lastSeen: new Date().toISOString(),
+            usedGb: 0,
+            source: "manual",
+            connected: false,
+          },
+        ],
+      };
+    });
+    setManualAddForm({ mac: "", name: "", ip: "" });
+    setShowManualAddForm(false);
   }
 
   function removePlan(id) {
@@ -949,7 +1014,7 @@ export default function MobileDataDashboard() {
               <CardHeader>
                 <CardTitle>Devices (MAC-based)</CardTitle>
                 <CardDescription>
-                  Auto-detect devices from router leases when available, then use MAC address as the stable identity key.
+                  Auto-detect devices from router leases. <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-500" />connected</span> · <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />not connected</span>. Manual devices persist across sessions.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -983,64 +1048,105 @@ export default function MobileDataDashboard() {
                   />
                 </div>
 
-                {state.deviceUsage.map((device, idx) => (
-                  <div key={device.id} className="grid grid-cols-1 gap-2 rounded-xl border p-3">
-                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                      <Input
-                        placeholder="MAC address (e.g. AA:BB:CC:DD:EE:FF)"
-                        value={device.mac || ""}
-                        onChange={(e) => updateDeviceUsage(idx, "mac", e.target.value.toUpperCase())}
-                      />
-                      <Input
-                        placeholder="IP address"
-                        value={device.ip || ""}
-                        onChange={(e) => updateDeviceUsage(idx, "ip", e.target.value)}
-                      />
-                    </div>
+                <div className="space-y-2">
+                  {state.deviceUsage.map((device) => {
+                    const isEditing = editingDeviceId === device.id;
+                    const displayName = device.name || device.hostname || autoNameFromMac(device.mac);
+                    const isManual = device.source === "manual";
+                    return (
+                      <div key={device.id} className="flex items-center gap-3 rounded-xl border p-3">
+                        <div
+                          className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${device.connected ? "bg-green-500" : "bg-red-500"}`}
+                          title={device.connected ? "Connected" : "Not connected"}
+                        />
+                        <div className="min-w-0 flex-1">
+                          {isEditing ? (
+                            <div className="flex items-center gap-2">
+                              <Input
+                                className="h-7 text-sm"
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                autoFocus
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") saveDeviceName(device.id);
+                                  if (e.key === "Escape") cancelRename();
+                                }}
+                              />
+                              <Button size="sm" className="h-7 px-2" onClick={() => saveDeviceName(device.id)} title="Save name">
+                                <Check className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-7 px-2" onClick={cancelRename} title="Cancel">
+                                <X className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="truncate text-sm font-medium">{displayName}</div>
+                          )}
+                          <div className="truncate text-xs text-muted-foreground">
+                            {device.mac}{device.ip ? ` · ${device.ip}` : ""}{device.hostname && device.name !== device.hostname ? ` · ${device.hostname}` : ""}
+                          </div>
+                        </div>
+                        <Badge variant="outline" className="flex-shrink-0 text-xs">
+                          {isManual ? "manual" : "auto"}
+                        </Badge>
+                        {!isEditing && (
+                          <div className="flex flex-shrink-0 gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 p-0"
+                              onClick={() => startRenameDevice(device.id, device.name || "")}
+                              title="Rename device"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            {isManual && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                                onClick={() => removeDevice(device.id)}
+                                title="Remove device"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
 
-                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                      <Input
-                        placeholder="Device name (optional, overrides auto name)"
-                        value={device.name || ""}
-                        onChange={(e) => updateDeviceUsage(idx, "name", e.target.value)}
-                      />
-                      <Input
-                        placeholder="Hostname (auto-detected)"
-                        value={device.hostname || ""}
-                        onChange={(e) => updateDeviceUsage(idx, "hostname", e.target.value)}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-                      <Input
-                        placeholder="Vendor"
-                        value={device.vendor || ""}
-                        onChange={(e) => updateDeviceUsage(idx, "vendor", e.target.value)}
-                      />
-                      <Input
-                        placeholder="Last seen"
-                        value={device.lastSeen ? new Date(device.lastSeen).toLocaleString() : ""}
-                        readOnly
-                      />
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={device.usedGb}
-                        onChange={(e) => updateDeviceUsage(idx, "usedGb", e.target.value)}
-                      />
-                    </div>
-
-                    <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                      <span>Display name: {device.name || device.hostname || autoNameFromMac(device.mac)}</span>
-                      <span>Source: {device.source || "manual"}</span>
-                    </div>
+                {showManualAddForm ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed p-3">
+                    <Input
+                      className="h-8 min-w-[180px] flex-1 text-sm"
+                      placeholder="MAC (AA:BB:CC:DD:EE:FF)"
+                      value={manualAddForm.mac}
+                      onChange={(e) => setManualAddForm((f) => ({ ...f, mac: e.target.value.toUpperCase() }))}
+                    />
+                    <Input
+                      className="h-8 min-w-[140px] flex-1 text-sm"
+                      placeholder="Name (optional)"
+                      value={manualAddForm.name}
+                      onChange={(e) => setManualAddForm((f) => ({ ...f, name: e.target.value }))}
+                    />
+                    <Input
+                      className="h-8 min-w-[120px] flex-1 text-sm"
+                      placeholder="IP (optional)"
+                      value={manualAddForm.ip}
+                      onChange={(e) => setManualAddForm((f) => ({ ...f, ip: e.target.value }))}
+                    />
+                    <Button size="sm" onClick={addManualDevice} disabled={!manualAddForm.mac.trim()}>Add</Button>
+                    <Button size="sm" variant="outline" onClick={cancelManualAdd}>Cancel</Button>
                   </div>
-                ))}
-
-                <Button variant="outline" className="w-full" onClick={addDeviceRow}>
-                  Add device
-                </Button>
+                ) : (
+                  <Button variant="outline" className="w-full" onClick={() => setShowManualAddForm(true)}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add manual device
+                  </Button>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
