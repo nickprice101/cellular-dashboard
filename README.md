@@ -53,11 +53,13 @@ This produces a `dist/` folder in the project root.
 
 **3. Copy files to the router**
 
+Bash
 ```bash
 rsync -az --delete dist/ root@192.168.8.1:/root/mobile-data-dashboard/dist/
 rsync -az server.js package.json package-lock.json root@192.168.8.1:/root/mobile-data-dashboard/
 ```
 
+Powershell
 ```powershell
 scp -O -r dist/* root@192.168.8.1:/root/mobile-data-dashboard/dist/
 scp -O server.js package.json package-lock.json root@192.168.8.1:/root/mobile-data-dashboard/
@@ -65,21 +67,13 @@ scp -O server.js package.json package-lock.json root@192.168.8.1:/root/mobile-da
 
 **4. Install production Node dependencies on the router**
 
-```bash
-ssh root@192.168.8.1 "cd /root/mobile-data-dashboard && npm ci --omit=dev"
-```
-
-```powershell
+```bash and powershell
 ssh root@192.168.8.1 "cd /root/mobile-data-dashboard && npm ci --omit=dev"
 ```
 
 **5. Start (or restart) the server on the router**
 
-```bash
-ssh root@192.168.8.1 "pkill -f 'node server.js'; cd /root/mobile-data-dashboard && nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &"
-```
-
-```powershell
+```bash and powershell
 ssh root@192.168.8.1 "pkill -f 'node server.js'; cd /root/mobile-data-dashboard && nohup node server.js > /var/log/cellular-dashboard.log 2>&1 &"
 ```
 
