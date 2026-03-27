@@ -116,7 +116,7 @@ foreach ($file in $serverFiles) {
     }
 }
 
-Run-Ssh "Check remote tools" "node -v && npm -v && command -v start-stop-daemon && command -v wget"
+Run-Ssh "Check remote tools" "node -v && npm -v && command -v wget && command -v ps && command -v awk && command -v grep"
 
 Run-Ssh "Prepare remote directories" "mkdir -p $RemoteDistDir && rm -rf $RemoteDistDir/* && mkdir -p $RemoteAppDir"
 
@@ -130,18 +130,39 @@ set -e
 APP_DIR="$RemoteAppDir"
 LOG_FILE="$RemoteLogFile"
 PID_FILE="$RemotePidFile"
+NODE_BIN="$(command -v node)"
 
 cd "$RemoteAppDir"
 
 npm ci --omit=dev
 
-start-stop-daemon -K -p "$RemotePidFile" >/dev/null 2>&1 || true
-pkill -f "node server.js" >/dev/null 2>&1 || true
 rm -f "$RemotePidFile"
 
-start-stop-daemon -S -b -m -p "$RemotePidFile" -x /bin/sh -- -c "exec node server.js >>$RemoteLogFile 2>&1"
+OLD_PIDS="$(ps | grep "$RemoteAppDir/server.js" | grep -v grep | awk '{print $1}')"
+for pid in $OLD_PIDS; do
+  kill "$pid" >/dev/null 2>&1 || true
+done
+
+sleep 2
+
+STILL_RUNNING="$(ps | grep "$RemoteAppDir/server.js" | grep -v grep | awk '{print $1}')"
+for pid in $STILL_RUNNING; do
+  kill -9 "$pid" >/dev/null 2>&1 || true
+done
+
+sleep 1
+
+"$NODE_BIN" "$RemoteAppDir/server.js" >>"$LOG_FILE" 2>&1 &
+NEW_PID=$!
+echo "$NEW_PID" > "$PID_FILE"
 
 sleep 3
+
+if ! kill -0 "$NEW_PID" >/dev/null 2>&1; then
+  echo "Server failed to stay running."
+  tail -n 80 "$LOG_FILE" 2>/dev/null || true
+  exit 1
+fi
 
 echo "=== PID FILE ==="
 if [ -s "$RemotePidFile" ]; then
@@ -149,6 +170,10 @@ if [ -s "$RemotePidFile" ]; then
 else
   echo "No PID file created"
 fi
+
+echo "=== LIVE DEVICE API ==="
+wget -qO- "http://127.0.0.1:3001/api/router/devices" 2>/dev/null || true
+echo
 
 echo "=== LOG TAIL ==="
 tail -n 50 "$RemoteLogFile" 2>/dev/null || true
