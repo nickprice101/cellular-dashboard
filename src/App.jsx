@@ -33,6 +33,11 @@ import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, Calendar
 
 const STORAGE_KEY = "mobile-data-dashboard-v1";
 const DEFAULT_POLLING_MINUTES = 15;
+const DEMO_MACS = new Set([
+  "AA:BB:CC:DD:EE:01",
+  "AA:BB:CC:DD:EE:02",
+  "AA:BB:CC:DD:EE:03",
+]);
 const COUNTRY_OPTIONS = [
   "Netherlands",
   "Belgium",
@@ -108,7 +113,13 @@ function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed?.deviceUsage)) {
+      parsed.deviceUsage = parsed.deviceUsage.filter(
+        (d) => !DEMO_MACS.has(normalizeMac(d.mac))
+      );
+    }
+    return parsed;
   } catch {
     return null;
   }
