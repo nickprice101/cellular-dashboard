@@ -309,6 +309,7 @@ export default function MobileDataDashboard() {
     cost: "",
     notes: "",
   });
+  const [activeTab, setActiveTab] = useState("overview");
   const [leaseText, setLeaseText] = useState("");
   const [isDetectingDevices, setIsDetectingDevices] = useState(false);
   const [deviceDetectMessage, setDeviceDetectMessage] = useState("");
@@ -356,6 +357,15 @@ export default function MobileDataDashboard() {
       percent: Number(d.usedGb || 0) / total,
     }));
   }, [state.deviceUsage]);
+
+  // Show manual devices always; auto-detected devices only when connected or they have consumed data
+  const visibleDevices = useMemo(
+    () =>
+      state.deviceUsage.filter(
+        (d) => d.source === "manual" || d.connected || Number(d.usedGb || 0) > 0
+      ),
+    [state.deviceUsage]
+  );
 
   const statusTone = currentPlan
     ? isExpired(currentPlan)
@@ -458,7 +468,10 @@ export default function MobileDataDashboard() {
 
         return {
           ...prev,
-          deviceUsage: Array.from(byMac.values()).filter((d) => d.mac),
+          // Remove non-connected auto-detected devices that have never consumed data
+          deviceUsage: Array.from(byMac.values()).filter(
+            (d) => d.mac && (d.source === "manual" || d.connected || Number(d.usedGb || 0) > 0)
+          ),
         };
       });
 
@@ -466,7 +479,10 @@ export default function MobileDataDashboard() {
     } catch {
       setState((prev) => ({
         ...prev,
-        deviceUsage: prev.deviceUsage.map((d) => ({ ...d, connected: false })),
+        // On failure, mark all disconnected and prune auto devices with no usage
+        deviceUsage: prev.deviceUsage
+          .map((d) => ({ ...d, connected: false }))
+          .filter((d) => d.source === "manual" || Number(d.usedGb || 0) > 0),
       }));
       setDeviceDetectMessage("Router device endpoint not reachable. Paste /tmp/dhcp.leases below to import devices manually.");
     } finally {
@@ -884,7 +900,14 @@ export default function MobileDataDashboard() {
           </Alert>
         )}
 
-        <Tabs defaultValue="overview" className="space-y-4">
+        <Tabs
+          value={activeTab}
+          onValueChange={(tab) => {
+            setActiveTab(tab);
+            if (tab === "devices") autoDetectDevices();
+          }}
+          className="space-y-4"
+        >
           <TabsList className="grid w-full grid-cols-4 md:w-auto">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="purchases">Purchases</TabsTrigger>
@@ -1131,7 +1154,7 @@ export default function MobileDataDashboard() {
                 </div>
 
                 <div className="space-y-2">
-                  {state.deviceUsage.map((device) => {
+                  {visibleDevices.map((device) => {
                     const isEditing = editingDeviceId === device.id;
                     const displayName = device.name || device.hostname || autoNameFromMac(device.mac);
                     const isManual = device.source === "manual";
