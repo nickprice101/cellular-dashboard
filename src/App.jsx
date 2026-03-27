@@ -179,35 +179,14 @@ function saveState(state) {
 }
 
 function seedState() {
-  const today = new Date();
-  const start = today.toISOString();
-  const validUntil = addDays(start, 30);
   return {
-    plans: [
-      {
-        id: uid("plan"),
-        name: "Example EU 50 GB",
-        country: "France",
-        provider: "EIOT Club",
-        sessionType: "new",
-        purchasedGb: 50,
-        remainingGb: 50,
-        validFrom: start,
-        validUntil,
-        cost: 39.99,
-        notes: "Sample plan",
-        createdAt: start,
-        status: "active",
-      },
-    ],
+    plans: [],
     routerUsage: {
-      totalGb: 0.33,
-      updatedAt: today.toISOString(),
+      totalGb: 0,
+      updatedAt: null,
     },
     deviceUsage: [],
-    usageSnapshots: [
-      { at: today.toISOString(), totalGb: 0.33 },
-    ],
+    usageSnapshots: [],
     settings: {
       interfaceName: "wwan0",
       providerName: "EIOT Club",
