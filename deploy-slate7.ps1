@@ -6,12 +6,12 @@ $HostName = "root@192.168.8.1"
 $RemoteAppDir = "/root/mobile-data-dashboard"
 $RemoteDistDir = "$RemoteAppDir/dist"
 $RemoteLogFile = "/var/log/cellular-dashboard.log"
+$RemotePidFile = "/var/run/cellular-dashboard.pid"
+$LocalRemoteScript = Join-Path $PWD ".remote-deploy.sh"
+$RemoteScriptPath = "/tmp/remote-deploy.sh"
 
 function Assert-LastExitCode {
-    param(
-        [string]$Step
-    )
-
+    param([string]$Step)
     if ($LASTEXITCODE -ne 0) {
         throw "$Step failed with exit code $LASTEXITCODE."
     }
@@ -36,7 +36,7 @@ function Run-Ssh {
     )
 
     Run-Step $Name {
-        ssh -i $Key -o IdentitiesOnly=yes $HostName $RemoteCommand
+        & ssh -T -i $Key -o IdentitiesOnly=yes $HostName $RemoteCommand
     }
 }
 
@@ -57,6 +57,17 @@ function Run-Scp {
         $scpArgs += $Destination
         & scp @scpArgs
     }
+}
+
+function Write-Utf8NoBomLf {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    $lfContent = $Content -replace "`r`n", "`n" -replace "`r", "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $lfContent, $utf8NoBom)
 }
 
 Write-Host "Starting deploy to Slate 7..." -ForegroundColor Green
@@ -93,16 +104,10 @@ if (-not (Test-Path "dist")) {
     throw "Build completed but dist folder was not found."
 }
 
-Run-Ssh "Check remote Node.js and npm" "node -v && npm -v"
-
-Run-Ssh "Prepare remote directories" "mkdir -p $RemoteDistDir && rm -rf $RemoteDistDir/*"
-
-$distFiles = Get-ChildItem -Path "dist" -Force | ForEach-Object { $_.FullName }
+$distFiles = Get-ChildItem -Path "dist" -Force
 if (-not $distFiles -or $distFiles.Count -eq 0) {
     throw "dist folder is empty. Nothing to deploy."
 }
-
-Run-Scp "Upload built frontend" $distFiles "${HostName}:${RemoteDistDir}/" -Recursive
 
 $serverFiles = @("server.js", "package.json", "package-lock.json")
 foreach ($file in $serverFiles) {
@@ -111,14 +116,57 @@ foreach ($file in $serverFiles) {
     }
 }
 
+Run-Ssh "Check remote tools" "node -v && npm -v && command -v start-stop-daemon && command -v wget"
+
+Run-Ssh "Prepare remote directories" "mkdir -p $RemoteDistDir && rm -rf $RemoteDistDir/* && mkdir -p $RemoteAppDir"
+
+Run-Scp "Upload built frontend" @("dist/*") "${HostName}:${RemoteDistDir}/" -Recursive
 Run-Scp "Upload server files" $serverFiles "${HostName}:${RemoteAppDir}/"
 
-Run-Ssh "Install remote production dependencies" "cd $RemoteAppDir && npm ci --omit=dev"
+$remoteScript = @"
+#!/bin/sh
+set -e
 
-Run-Ssh "Restart remote server" "pkill -f 'node server.js' || true; cd $RemoteAppDir && nohup node server.js > $RemoteLogFile 2>&1 &"
+APP_DIR="$RemoteAppDir"
+LOG_FILE="$RemoteLogFile"
+PID_FILE="$RemotePidFile"
 
-Run-Ssh "Verify remote server process" "pgrep -af 'node server.js'"
+cd "$RemoteAppDir"
+
+npm ci --omit=dev
+
+start-stop-daemon -K -p "$RemotePidFile" >/dev/null 2>&1 || true
+pkill -f "node server.js" >/dev/null 2>&1 || true
+rm -f "$RemotePidFile"
+
+start-stop-daemon -S -b -m -p "$RemotePidFile" -x /bin/sh -- -c "exec node server.js >>$RemoteLogFile 2>&1"
+
+sleep 3
+
+echo "=== PID FILE ==="
+if [ -s "$RemotePidFile" ]; then
+  cat "$RemotePidFile"
+else
+  echo "No PID file created"
+fi
+
+echo "=== LOG TAIL ==="
+tail -n 50 "$RemoteLogFile" 2>/dev/null || true
+"@
+
+Write-Utf8NoBomLf -Path $LocalRemoteScript -Content $remoteScript
+
+try {
+    Run-Scp "Upload remote control script" @($LocalRemoteScript) "${HostName}:${RemoteScriptPath}"
+    Run-Ssh "Run remote control script" "chmod +x $RemoteScriptPath && sed -i 's/\r$//' $RemoteScriptPath && sh $RemoteScriptPath"
+}
+finally {
+    if (Test-Path $LocalRemoteScript) {
+        Remove-Item $LocalRemoteScript -Force
+    }
+}
 
 Write-Host ""
 Write-Host "Deploy complete." -ForegroundColor Green
 Write-Host "Remote log: $RemoteLogFile"
+Write-Host "Remote PID file: $RemotePidFile"
