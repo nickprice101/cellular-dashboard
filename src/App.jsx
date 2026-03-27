@@ -31,7 +31,8 @@ import { Database, Globe, History, Plus, Router, Wallet, AlertTriangle, Calendar
  * The UI falls back gracefully when the endpoints are not reachable.
  */
 
-const STORAGE_KEY = "mobile-data-dashboard-v1";
+const STORAGE_KEY = "mobile-data-dashboard-v2";
+const FETCH_CACHE_BUSTER = "slate7-device-list-v2";
 const DEFAULT_POLLING_MINUTES = 15;
 const COUNTRY_OPTIONS = [
   "Netherlands",
@@ -87,6 +88,11 @@ function fmtGB(v) {
   if (n >= 1024) return `${(n / 1024).toFixed(2)} TB`;
   if (n >= 1) return `${n.toFixed(2)} GB`;
   return `${(n * 1024).toFixed(0)} MB`;
+}
+
+function withCacheBust(url) {
+  const value = `${FETCH_CACHE_BUSTER}-${Date.now()}`;
+  return url.includes("?") ? `${url}&_=${encodeURIComponent(value)}` : `${url}?_=${encodeURIComponent(value)}`;
 }
 
 
@@ -424,7 +430,7 @@ export default function MobileDataDashboard() {
     setSyncError("");
     try {
       const response = await fetch(
-        `/api/router/usage?iface=${encodeURIComponent(state.settings.interfaceName || "wwan0")}`,
+        withCacheBust(`/api/router/usage?iface=${encodeURIComponent(state.settings.interfaceName || "wwan0")}`),
         { cache: "no-store" }
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -467,7 +473,7 @@ export default function MobileDataDashboard() {
     setDeviceDetectMessage("");
 
     try {
-      const response = await fetch("/api/router/devices", { cache: "no-store" });
+      const response = await fetch(withCacheBust("/api/router/devices"), { cache: "no-store" });
       if (!response.ok) throw new Error("Router device endpoint not available");
 
       const payload = await response.json();

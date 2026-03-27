@@ -26,6 +26,7 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
+app.disable("etag");
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 // Limits each IP to 120 requests per minute to prevent abuse.
@@ -39,7 +40,33 @@ app.use(limiter);
 
 // ── Static files (production build) ─────────────────────────────────────────
 const distPath = path.join(__dirname, "dist");
-app.use(express.static(distPath));
+app.use("/api", (_req, res, next) => {
+  res.set({
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+    "Surrogate-Control": "no-store",
+  });
+  next();
+});
+
+app.use(
+  express.static(distPath, {
+    etag: false,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Expires", "0");
+        return;
+      }
+
+      if (/\.[A-Za-z0-9_-]+\.(js|css)$/.test(path.basename(filePath))) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      }
+    },
+  })
+);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -671,6 +698,11 @@ app.get("/api/router/devices", async (req, res) => {
 
 // ── SPA fallback ─────────────────────────────────────────────────────────────
 app.get("/{*path}", (_req, res) => {
+  res.set({
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+  });
   res.sendFile(path.join(distPath, "index.html"));
 });
 
