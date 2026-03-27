@@ -456,7 +456,8 @@ export default function MobileDataDashboard() {
         };
       });
 
-      setDeviceDetectMessage(`Scanned router: ${detected.length} device${detected.length === 1 ? "" : "s"} found online.`);
+      const onlineCount = detected.filter((d) => d.connected).length;
+      setDeviceDetectMessage(`Scanned router: ${detected.length} device${detected.length === 1 ? "" : "s"} found (${onlineCount} online).`);
     } catch {
       setState((prev) => ({
         ...prev,
