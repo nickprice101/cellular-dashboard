@@ -104,18 +104,72 @@ function isActive(plan, now = new Date()) {
   return !isExpired(plan, now) && Number(plan.remainingGb) > 0 && plan.status !== "paused";
 }
 
+function getNonExpiredPlanIds(plans, now = new Date()) {
+  return plans.filter((plan) => !isExpired(plan, now)).map((plan) => plan.id);
+}
+
+function getActivePlanIds(plans, now = new Date()) {
+  return plans.filter((plan) => isActive(plan, now)).map((plan) => plan.id);
+}
+
+function mergePlanIds(...values) {
+  return Array.from(new Set(values.flat().filter(Boolean)));
+}
+
+function sanitizeTrackedDevice(device) {
+  const mac = normalizeMac(device?.mac);
+  if (!mac) return null;
+  return {
+    id: device.id || uid("dev"),
+    mac,
+    ip: device.ip || "",
+    hostname: device.hostname || "",
+    name: device.name || "",
+    vendor: device.vendor || guessVendorFromMac(mac),
+    lastSeen: device.lastSeen || new Date().toISOString(),
+    usedGb: Number(device.usedGb || 0),
+    source: device.source === "manual" ? "manual" : "auto",
+    connected: Boolean(device.connected),
+    planIds: Array.isArray(device.planIds) ? mergePlanIds(device.planIds) : [],
+  };
+}
+
+function reconcileDeviceUsage(devices, plans, { resetConnected = false } = {}) {
+  const validPlanIds = new Set(getNonExpiredPlanIds(plans));
+
+  return (devices || [])
+    .map((device) => sanitizeTrackedDevice(device))
+    .filter(Boolean)
+    .map((device) => ({
+      ...device,
+      connected: resetConnected ? false : device.connected,
+      planIds: device.planIds.filter((planId) => validPlanIds.has(planId)),
+    }))
+    .filter((device) => device.source === "manual" || device.connected || device.planIds.length > 0);
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return {
+      ...parsed,
+      deviceUsage: reconcileDeviceUsage(parsed.deviceUsage || [], parsed.plans || [], { resetConnected: true }),
+    };
   } catch {
     return null;
   }
 }
 
 function saveState(state) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      ...state,
+      deviceUsage: reconcileDeviceUsage(state.deviceUsage || [], state.plans || []),
+    })
+  );
 }
 
 function seedState() {
@@ -306,6 +360,15 @@ export default function MobileDataDashboard() {
     saveState(state);
   }, [state]);
 
+  useEffect(() => {
+    setState((prev) => {
+      const nextDeviceUsage = reconcileDeviceUsage(prev.deviceUsage, prev.plans);
+      return JSON.stringify(nextDeviceUsage) === JSON.stringify(prev.deviceUsage)
+        ? prev
+        : { ...prev, deviceUsage: nextDeviceUsage };
+    });
+  }, [state.plans]);
+
   const plans = useMemo(
     () => allocateUsageFIFO(state.plans, state.routerUsage.totalGb),
     [state.plans, state.routerUsage.totalGb]
@@ -316,7 +379,7 @@ export default function MobileDataDashboard() {
       setState((prev) => ({ ...prev, plans }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.routerUsage.totalGb]);
+  }, [plans]);
 
   const currentPlan = useMemo(() => getCurrentPlan(plans), [plans]);
   const totalPurchasedGb = useMemo(() => plans.reduce((s, p) => s + Number(p.purchasedGb || 0), 0), [plans]);
@@ -339,13 +402,13 @@ export default function MobileDataDashboard() {
     }));
   }, [state.deviceUsage]);
 
-  // Show manual devices always; auto-detected devices only when connected or they have consumed data
   const visibleDevices = useMemo(
     () =>
-      state.deviceUsage.filter(
-        (d) => d.source === "manual" || d.connected || Number(d.usedGb || 0) > 0
-      ),
-    [state.deviceUsage]
+      [...reconcileDeviceUsage(state.deviceUsage, plans)].sort((a, b) => {
+        if (a.connected !== b.connected) return Number(b.connected) - Number(a.connected);
+        return (a.name || a.hostname || a.mac).localeCompare(b.name || b.hostname || b.mac);
+      }),
+    [state.deviceUsage, plans]
   );
 
   const statusTone = currentPlan
@@ -419,68 +482,61 @@ export default function MobileDataDashboard() {
             lastSeen: device.lastSeen || new Date().toISOString(),
             usedGb: 0,
             source: "auto",
-            connected: device.connected ?? true,
+            connected: true,
+            planIds: [],
           }))
         : [];
 
       setState((prev) => {
         // Build a lookup of all previously-tracked devices keyed by MAC so we
         // can preserve user-assigned names and accumulated usage data.
-        const prevByMac = new Map(
-          prev.deviceUsage.map((d) => [normalizeMac(d.mac), d])
-        );
+        const activePlanIds = getActivePlanIds(prev.plans);
 
         // Start with only manual devices – auto-detected entries from previous
         // scans are intentionally dropped here so that stale devices from a
         // different subnet (or devices the router no longer knows about) are
         // purged automatically on each successful scan.
         const byMac = new Map(
-          prev.deviceUsage
-            .filter((d) => d.source === "manual")
+          reconcileDeviceUsage(prev.deviceUsage, prev.plans)
             .map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
         );
 
         detected.forEach((device) => {
           const mac = device.mac;
           if (byMac.has(mac)) {
-            // Manual device with matching MAC – keep manual settings, update
-            // network info and connection status.
             const current = byMac.get(mac);
-            byMac.set(mac, {
+            byMac.set(mac, sanitizeTrackedDevice({
               ...current,
-              ip: device.ip || current.ip || "",
-              hostname: device.hostname || current.hostname || "",
-              lastSeen: device.lastSeen || current.lastSeen || "",
-              connected: device.connected ?? true,
-            });
-          } else {
-            // New or re-appearing auto device: restore the user's custom name
-            // and any previously accumulated usage so that renaming / usage
-            // history survives router rescans.
-            const existing = prevByMac.get(mac);
-            byMac.set(mac, {
               ...device,
-              name: existing?.name || device.name || "",
-              usedGb: existing?.usedGb || 0,
-            });
+              id: current?.id || device.id,
+              name: current?.name || device.name || "",
+              usedGb: current?.usedGb || 0,
+              source: current?.source === "manual" ? "manual" : "auto",
+              connected: true,
+              planIds: mergePlanIds(current?.planIds || [], activePlanIds),
+            }));
+          } else {
+            byMac.set(mac, sanitizeTrackedDevice({
+              ...device,
+              planIds: [...activePlanIds],
+            }));
           }
         });
 
         return {
           ...prev,
-          deviceUsage: Array.from(byMac.values()),
+          deviceUsage: reconcileDeviceUsage(Array.from(byMac.values()), prev.plans),
         };
       });
 
-      const onlineCount = detected.filter((d) => d.connected).length;
-      setDeviceDetectMessage(`Scanned router: ${detected.length} device${detected.length === 1 ? "" : "s"} found (${onlineCount} online).`);
+      setDeviceDetectMessage(`Scanned router: ${detected.length} active device${detected.length === 1 ? "" : "s"} found.`);
     } catch {
       setState((prev) => ({
         ...prev,
-        // On failure, mark all disconnected and prune auto devices with no usage
-        deviceUsage: prev.deviceUsage
-          .map((d) => ({ ...d, connected: false }))
-          .filter((d) => d.source === "manual" || Number(d.usedGb || 0) > 0),
+        deviceUsage: reconcileDeviceUsage(
+          prev.deviceUsage.map((d) => ({ ...d, connected: false })),
+          prev.plans
+        ),
       }));
       setDeviceDetectMessage("Router device endpoint not reachable. Paste /tmp/dhcp.leases below to import devices manually.");
     } finally {
@@ -492,29 +548,38 @@ export default function MobileDataDashboard() {
     const detected = parseDhcpLeases(leaseText);
 
     setState((prev) => {
+      const activePlanIds = getActivePlanIds(prev.plans);
       const byMac = new Map(
-        prev.deviceUsage.map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
+        reconcileDeviceUsage(prev.deviceUsage, prev.plans)
+          .map((d) => [normalizeMac(d.mac), { ...d, connected: false }])
       );
 
       detected.forEach((device) => {
         const mac = device.mac;
         if (byMac.has(mac)) {
           const current = byMac.get(mac);
-          byMac.set(mac, {
+          byMac.set(mac, sanitizeTrackedDevice({
             ...current,
-            ip: device.ip || current.ip || "",
-            hostname: device.hostname || current.hostname || "",
-            lastSeen: device.lastSeen || current.lastSeen || "",
+            ...device,
+            id: current?.id || device.id,
+            name: current?.name || device.name || "",
+            usedGb: current?.usedGb || 0,
+            source: current?.source === "manual" ? "manual" : "auto",
             connected: true,
-          });
+            planIds: mergePlanIds(current?.planIds || [], activePlanIds),
+          }));
         } else {
-          byMac.set(mac, { ...device, connected: true });
+          byMac.set(mac, sanitizeTrackedDevice({
+            ...device,
+            connected: true,
+            planIds: [...activePlanIds],
+          }));
         }
       });
 
       return {
         ...prev,
-        deviceUsage: Array.from(byMac.values()).filter((d) => d.mac),
+        deviceUsage: reconcileDeviceUsage(Array.from(byMac.values()), prev.plans),
       };
     });
 
@@ -1117,7 +1182,7 @@ export default function MobileDataDashboard() {
               <CardHeader>
                 <CardTitle>Devices (MAC-based)</CardTitle>
                 <CardDescription>
-                  Auto-detect reads <code>/tmp/dhcp.leases</code>, <code>ip neigh</code>, and OUI vendor lookup from the router. <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-500" />connected</span> · <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />not connected</span>. Manual devices persist across sessions.
+                  Auto-detect matches the router’s live LAN client view using OpenWrt-friendly sources instead of <code>wwan0</code>. Disconnected entries are limited to remembered devices from non-expired plans plus anything manually added or renamed.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">

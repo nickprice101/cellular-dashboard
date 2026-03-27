@@ -65,12 +65,29 @@ async function getVnstatTotalGb(iface = "wwan0") {
   return Number(totalGb.toFixed(6));
 }
 
+function normalizeMac(mac) {
+  return String(mac || "").trim().toUpperCase();
+}
+
+async function readJsonCommand(command, args, timeout = 5_000) {
+  try {
+    const { stdout } = await execFileAsync(command, args, { timeout });
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function mergeUnique(values = []) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
 /**
  * Look up the vendor name from a MAC address using a local OUI map.
  * The OUI is the first three octets of the MAC (e.g. "AA:BB:CC").
  */
 function guessVendorFromMac(mac) {
-  const oui = String(mac || "").toUpperCase().slice(0, 8);
+  const oui = normalizeMac(mac).slice(0, 8);
   const OUI_MAP = {
     "00:00:0C": "Cisco",
     "00:01:42": "Cisco",
@@ -341,7 +358,7 @@ async function parseDhcpLeases(leasesPath = "/tmp/dhcp.leases") {
       const parts = line.split(/\s+/);
       if (parts.length < 4) return null;
       const [expiry, mac, ip, hostname] = parts;
-      const normalizedMac = mac.toUpperCase();
+      const normalizedMac = normalizeMac(mac);
       return {
         mac: normalizedMac,
         ip,
@@ -352,6 +369,84 @@ async function parseDhcpLeases(leasesPath = "/tmp/dhcp.leases") {
       };
     })
     .filter(Boolean);
+}
+
+async function getUbusDhcpLeases() {
+  const payload = await readJsonCommand("ubus", ["call", "luci-rpc", "getDHCPLeases"]);
+  if (!payload || typeof payload !== "object") return [];
+
+  const leaseArrays = [
+    ...(Array.isArray(payload.leases) ? [payload.leases] : []),
+    ...(Array.isArray(payload.ipv4leases) ? [payload.ipv4leases] : []),
+    ...(Array.isArray(payload.dhcp_leases) ? [payload.dhcp_leases] : []),
+  ];
+
+  return leaseArrays.flatMap((leases) =>
+    leases
+      .map((lease) => {
+        const mac = normalizeMac(lease?.macaddr || lease?.mac);
+        if (!mac) return null;
+        return {
+          mac,
+          ip: lease.ipaddr || lease.ip || "",
+          hostname: lease.hostname || lease.host || "",
+          vendor: guessVendorFromMac(mac),
+          lastSeen:
+            lease.expires || lease.expiry
+              ? new Date(Number(lease.expires || lease.expiry) * 1000).toISOString()
+              : new Date().toISOString(),
+          source: "ubus-dhcp",
+        };
+      })
+      .filter(Boolean)
+  );
+}
+
+async function getDhcpLeaseDevices() {
+  const [tmpLeases, varLeases, ubusLeases] = await Promise.all([
+    parseDhcpLeases("/tmp/dhcp.leases"),
+    parseDhcpLeases("/var/dhcp.leases"),
+    getUbusDhcpLeases(),
+  ]);
+
+  const byMac = new Map();
+  [...tmpLeases, ...varLeases, ...ubusLeases].forEach((device) => {
+    if (!device?.mac) return;
+    const mac = normalizeMac(device.mac);
+    const current = byMac.get(mac) || {};
+    byMac.set(mac, {
+      mac,
+      ip: device.ip || current.ip || "",
+      hostname: device.hostname || current.hostname || "",
+      vendor: device.vendor || current.vendor || guessVendorFromMac(mac),
+      lastSeen: device.lastSeen || current.lastSeen || new Date().toISOString(),
+      source: current.source || device.source || "dhcp",
+    });
+  });
+
+  return Array.from(byMac.values());
+}
+
+async function getHostHintsByMac() {
+  const payload = await readJsonCommand("ubus", ["call", "luci-rpc", "getHostHints"]);
+  if (!payload || typeof payload !== "object") return new Map();
+
+  const hints = payload.hosts && typeof payload.hosts === "object" ? payload.hosts : payload;
+  const byMac = new Map();
+
+  Object.entries(hints).forEach(([key, value]) => {
+    if (!value || typeof value !== "object") return;
+    const mac = normalizeMac(value.mac || value.macaddr || (key.includes(":") ? key : ""));
+    if (!mac) return;
+    byMac.set(mac, {
+      mac,
+      ip: value.ip || value.ipaddr || (Array.isArray(value.ipaddrs) ? value.ipaddrs[0] : "") || "",
+      hostname: value.name || value.hostname || value.host || "",
+      vendor: value.vendor || guessVendorFromMac(mac),
+    });
+  });
+
+  return byMac;
 }
 
 /**
@@ -365,7 +460,7 @@ async function getIpNeighMap() {
       // e.g. "192.168.1.5 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE"
       const m = line.match(/^(\S+)\s+.*lladdr\s+([0-9a-f:]+)\s+(\S+)/i);
       if (m) {
-        map.set(m[1], { mac: m[2].toUpperCase(), state: m[3] });
+        map.set(m[1], { mac: normalizeMac(m[2]), state: m[3] });
       }
     });
     return map;
@@ -381,6 +476,8 @@ async function getIpNeighMap() {
  */
 async function getWifiStations() {
   const macs = new Set();
+  const ubusStations = await getWifiStationsViaUbus();
+  ubusStations.forEach((mac) => macs.add(mac));
   try {
     const { stdout: devOut } = await execFileAsync("iw", ["dev"], { timeout: 5_000 });
     const ifaces = [];
@@ -396,7 +493,7 @@ async function getWifiStations() {
           });
           for (const line of stdout.split(/\r?\n/)) {
             const m = line.match(/^Station\s+([0-9a-f:]+)\s+/i);
-            if (m) macs.add(m[1].toUpperCase());
+            if (m) macs.add(normalizeMac(m[1]));
           }
         } catch {
           // interface may not support station dump – skip
@@ -406,6 +503,56 @@ async function getWifiStations() {
   } catch {
     // iw not available – fall back gracefully
   }
+  return macs;
+}
+
+async function getWifiStationsViaUbus() {
+  const macs = new Set();
+  try {
+    const { stdout } = await execFileAsync("ubus", ["list", "hostapd.*"], { timeout: 5_000 });
+    const objects = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    await Promise.all(
+      objects.map(async (objectName) => {
+        const payload = await readJsonCommand("ubus", ["call", objectName, "get_clients"]);
+        const clients = payload?.clients;
+        if (!clients || typeof clients !== "object") return;
+        Object.keys(clients).forEach((mac) => macs.add(normalizeMac(mac)));
+      })
+    );
+  } catch {
+    // hostapd ubus objects may be unavailable
+  }
+  return macs;
+}
+
+async function getBridgeFdbMacs() {
+  const macs = new Set();
+  const commands = [
+    ["bridge", ["fdb", "show", "br", "br-lan"]],
+    ["bridge", ["fdb", "show"]],
+  ];
+
+  for (const [command, args] of commands) {
+    try {
+      const { stdout } = await execFileAsync(command, args, { timeout: 5_000 });
+      stdout.split(/\r?\n/).forEach((line) => {
+        const macMatch = line.match(/^([0-9a-f:]{17})\s+/i);
+        if (!macMatch) return;
+        const mac = normalizeMac(macMatch[1]);
+        if (!mac || mac === "00:00:00:00:00:00") return;
+        if (/\b(self|permanent|static)\b/i.test(line)) return;
+        macs.add(mac);
+      });
+      if (macs.size) return macs;
+    } catch {
+      // try next fallback
+    }
+  }
+
   return macs;
 }
 
@@ -426,21 +573,34 @@ app.get("/api/router/usage", async (req, res) => {
 
 app.get("/api/router/devices", async (req, res) => {
   try {
-    const [leaseDevices, neighMap, wifiStations] = await Promise.all([
-      parseDhcpLeases(),
+    const [leaseDevices, hostHintsByMac, neighMap, wifiStations, bridgeFdbMacs] = await Promise.all([
+      getDhcpLeaseDevices(),
+      getHostHintsByMac(),
       getIpNeighMap(),
       getWifiStations(),
+      getBridgeFdbMacs(),
     ]);
 
-    // Merge: prefer DHCP data; enrich with ip neigh state and vendor lookup
     const byMac = new Map();
-    leaseDevices.forEach((d) => byMac.set(d.mac, { ...d, connected: false }));
+    leaseDevices.forEach((d) => byMac.set(d.mac, { ...d, connected: false, sources: ["dhcp"] }));
+
+    hostHintsByMac.forEach((hint, mac) => {
+      const existing = byMac.get(mac);
+      if (!existing) return;
+      byMac.set(mac, {
+        ...existing,
+        ip: existing.ip || hint.ip || "",
+        hostname: existing.hostname || hint.hostname || "",
+        vendor: hint.vendor || existing.vendor || guessVendorFromMac(mac),
+        sources: mergeUnique([...(existing.sources || []), "host-hints"]),
+      });
+    });
 
     // Add any neighbours not already in leases.
     // Only REACHABLE/DELAY/PROBE indicate current activity – STALE means the
     // kernel cache is stale and the device may have disconnected already.
     neighMap.forEach(({ mac, state }, ip) => {
-      const neighConnected = /^(REACHABLE|DELAY|PROBE)$/i.test(state);
+      const neighConnected = !/^(FAILED|INCOMPLETE|NOARP|NONE)$/i.test(state);
       if (!byMac.has(mac)) {
         byMac.set(mac, {
           mac,
@@ -450,6 +610,7 @@ app.get("/api/router/devices", async (req, res) => {
           lastSeen: new Date().toISOString(),
           source: "neigh",
           connected: neighConnected,
+          sources: ["neigh"],
         });
       } else {
         const existing = byMac.get(mac);
@@ -458,6 +619,7 @@ app.get("/api/router/devices", async (req, res) => {
           ip: existing.ip || ip,
           neighState: state,
           connected: existing.connected || neighConnected,
+          sources: mergeUnique([...(existing.sources || []), "neigh"]),
         });
       }
     });
@@ -466,7 +628,12 @@ app.get("/api/router/devices", async (req, res) => {
     // wireless clients – mark any known device as connected if it is associated.
     wifiStations.forEach((mac) => {
       if (byMac.has(mac)) {
-        byMac.set(mac, { ...byMac.get(mac), connected: true });
+        byMac.set(mac, {
+          ...byMac.get(mac),
+          connected: true,
+          lastSeen: new Date().toISOString(),
+          sources: mergeUnique([...(byMac.get(mac).sources || []), "wifi"]),
+        });
       } else {
         byMac.set(mac, {
           mac,
@@ -476,11 +643,36 @@ app.get("/api/router/devices", async (req, res) => {
           lastSeen: new Date().toISOString(),
           source: "wifi",
           connected: true,
+          sources: ["wifi"],
         });
       }
     });
 
-    const devices = Array.from(byMac.values());
+    bridgeFdbMacs.forEach((mac) => {
+      if (byMac.has(mac)) {
+        byMac.set(mac, {
+          ...byMac.get(mac),
+          connected: true,
+          lastSeen: new Date().toISOString(),
+          sources: mergeUnique([...(byMac.get(mac).sources || []), "bridge"]),
+        });
+      } else {
+        byMac.set(mac, {
+          mac,
+          ip: "",
+          hostname: "",
+          vendor: guessVendorFromMac(mac),
+          lastSeen: new Date().toISOString(),
+          source: "bridge",
+          connected: true,
+          sources: ["bridge"],
+        });
+      }
+    });
+
+    const devices = Array.from(byMac.values())
+      .filter((device) => device.connected)
+      .sort((a, b) => (a.hostname || a.mac).localeCompare(b.hostname || b.mac));
     res.json({ devices, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error("[devices]", err.message);
