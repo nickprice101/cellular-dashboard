@@ -787,7 +787,7 @@ export default function MobileDataDashboard() {
                   Add data purchase
                 </Button>
               </DialogTrigger>
-              <DialogContent className="max-w-2xl">
+              <DialogContent className="max-w-2xl bg-white">
                 <DialogHeader>
                   <DialogTitle>Add data purchase</DialogTitle>
                   <DialogDescription>
